@@ -90,7 +90,7 @@ func (c Changer) EnterJoint(autoLeave bool, ccs ...pb.ConfChangeSingle) (tracker
 //
 // [1]: https://github.com/ongardie/dissertation/blob/master/online-trim.pdf
 func (c Changer) LeaveJoint() (tracker.Config, tracker.ProgressMap, error) {
-	cfg, prs, err := c.checkAndCopy()
+	cfg, prs, err := c.checkAndCopy() //检查配置是否合法
 	if err != nil {
 		return c.err(err)
 	}
@@ -282,6 +282,7 @@ func checkInvariants(cfg tracker.Config, prs tracker.ProgressMap) error {
 	// during tests). Instead of having to hand-code this, we allow
 	// transitioning from an empty config into any other legal and non-empty
 	// config.
+	// 检查voters、learners、learnersNext是不是都在prs中
 	for _, ids := range []map[uint64]struct{}{
 		cfg.Voters.IDs(),
 		cfg.Learners,
@@ -296,7 +297,7 @@ func checkInvariants(cfg tracker.Config, prs tracker.ProgressMap) error {
 
 	// Any staged learner was staged because it could not be directly added due
 	// to a conflicting voter in the outgoing config.
-	for id := range cfg.LearnersNext {
+	for id := range cfg.LearnersNext { //检查learnersNext中是否有已经是learner的，或者不在voters[1]中的
 		if _, ok := outgoing(cfg.Voters)[id]; !ok {
 			return fmt.Errorf("%d is in LearnersNext, but not Voters[1]", id)
 		}
@@ -305,7 +306,7 @@ func checkInvariants(cfg tracker.Config, prs tracker.ProgressMap) error {
 		}
 	}
 	// Conversely Learners and Voters doesn't intersect at all.
-	for id := range cfg.Learners {
+	for id := range cfg.Learners { //检查是否有既是学习者又是选民的节点、检查是否有是学习者，但是没有被标记为学习者的节点
 		if _, ok := outgoing(cfg.Voters)[id]; ok {
 			return fmt.Errorf("%d is in Learners and Voters[1]", id)
 		}
@@ -317,15 +318,15 @@ func checkInvariants(cfg tracker.Config, prs tracker.ProgressMap) error {
 		}
 	}
 
-	if !joint(cfg) {
+	if !joint(cfg) { //判断是否为联合配置
 		// We enforce that empty maps are nil instead of zero.
-		if outgoing(cfg.Voters) != nil {
+		if outgoing(cfg.Voters) != nil { //当不是联合配置时，voters[1]当为空
 			return fmt.Errorf("cfg.Voters[1] must be nil when not joint")
 		}
-		if cfg.LearnersNext != nil {
+		if cfg.LearnersNext != nil { //当不是联合配置时，不会有即将成为学习者的节点
 			return fmt.Errorf("cfg.LearnersNext must be nil when not joint")
 		}
-		if cfg.AutoLeave {
+		if cfg.AutoLeave { //当不是联合配置时，autoLeave标志应该为false
 			return fmt.Errorf("AutoLeave must be false when not joint")
 		}
 	}
@@ -337,7 +338,7 @@ func checkInvariants(cfg tracker.Config, prs tracker.ProgressMap) error {
 // the purposes of the Changer) and returns those copies. It returns an error
 // if checkInvariants does.
 func (c Changer) checkAndCopy() (tracker.Config, tracker.ProgressMap, error) {
-	cfg := c.Tracker.Config.Clone()
+	cfg := c.Tracker.Config.Clone() //拷贝cfg
 	prs := tracker.ProgressMap{}
 
 	for id, pr := range c.Tracker.Progress {
@@ -345,13 +346,13 @@ func (c Changer) checkAndCopy() (tracker.Config, tracker.ProgressMap, error) {
 		ppr := *pr
 		prs[id] = &ppr
 	}
-	return checkAndReturn(cfg, prs)
+	return checkAndReturn(cfg, prs) //检查配置并返回结果，如果检查不通过，则返回错误信息
 }
 
 // checkAndReturn calls checkInvariants on the input and returns either the
 // resulting error or the input.
 func checkAndReturn(cfg tracker.Config, prs tracker.ProgressMap) (tracker.Config, tracker.ProgressMap, error) {
-	if err := checkInvariants(cfg, prs); err != nil {
+	if err := checkInvariants(cfg, prs); err != nil { //检查配置
 		return tracker.Config{}, tracker.ProgressMap{}, err
 	}
 	return cfg, prs, nil

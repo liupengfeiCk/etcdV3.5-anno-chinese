@@ -549,40 +549,43 @@ func (r *raft) bcastHeartbeatWithCtx(ctx []byte) { //发送心跳
 }
 
 func (r *raft) advance(rd Ready) {
-	r.reduceUncommittedSize(rd.CommittedEntries)
+	r.reduceUncommittedSize(rd.CommittedEntries) //减去未提交日志的大小，因为这些日志已经提交（这里的提交实际上是已提交待应用的日志）
 
 	// If entries were applied (or a snapshot), update our cursor for
 	// the next Ready. Note that if the current HardState contains a
 	// new Commit index, this does not mean that we're also applying
 	// all of the new entries due to commit pagination by size.
-	if newApplied := rd.appliedCursor(); newApplied > 0 {
-		oldApplied := r.raftLog.applied
-		r.raftLog.appliedTo(newApplied)
+	if newApplied := rd.appliedCursor(); newApplied > 0 { //获取已应用的位置
+		oldApplied := r.raftLog.applied //获取之前已应用的位置
+		r.raftLog.appliedTo(newApplied) //更新已应用位置，只能增量更新
 
+		//如果自动转移为真，且之前已经应用的位置小于等于pendingConfIndex，且新的已应用位置大于等于pendingConfIndex，且为leader
+		//即已提交位置已经超过pendingConfIndex
 		if r.prs.Config.AutoLeave && oldApplied <= r.pendingConfIndex && newApplied >= r.pendingConfIndex && r.state == StateLeader {
 			// If the current (and most recent, at least for this leader's term)
 			// configuration should be auto-left, initiate that now. We use a
 			// nil Data which unmarshals into an empty ConfChangeV2 and has the
 			// benefit that appendEntry can never refuse it based on its size
 			// (which registers as zero).
-			ent := pb.Entry{
+			ent := pb.Entry{ //创建一个空v2配置
 				Type: pb.EntryConfChangeV2,
 				Data: nil,
 			}
 			// There's no way in which this proposal should be able to be rejected.
+			// 将空v2配置添加到日志中
 			if !r.appendEntry(ent) {
 				panic("refused un-refusable auto-leaving ConfChangeV2")
 			}
-			r.pendingConfIndex = r.raftLog.lastIndex()
+			r.pendingConfIndex = r.raftLog.lastIndex() //更新新的pendingConfIndex为当前这个v2配置的索引
 			r.logger.Infof("initiating automatic transition out of joint configuration %s", r.prs.Config)
 		}
 	}
 
-	if len(rd.Entries) > 0 {
+	if len(rd.Entries) > 0 { //缩小unstable
 		e := rd.Entries[len(rd.Entries)-1]
 		r.raftLog.stableTo(e.Index, e.Term)
 	}
-	if !IsEmptySnap(rd.Snapshot) {
+	if !IsEmptySnap(rd.Snapshot) { //清空快照数据
 		r.raftLog.stableSnapTo(rd.Snapshot.Metadata.Index)
 	}
 }
@@ -1636,11 +1639,11 @@ func (r *raft) promotable() bool {
 
 func (r *raft) applyConfChange(cc pb.ConfChangeV2) pb.ConfState {
 	cfg, prs, err := func() (tracker.Config, tracker.ProgressMap, error) {
-		changer := confchange.Changer{
-			Tracker:   r.prs,
-			LastIndex: r.raftLog.lastIndex(),
+		changer := confchange.Changer{ //创建一个changer实例
+			Tracker:   r.prs,                 //获取prs
+			LastIndex: r.raftLog.lastIndex(), //获取日志最后一条记录
 		}
-		if cc.LeaveJoint() {
+		if cc.LeaveJoint() { //如果是一个空配置
 			return changer.LeaveJoint()
 		} else if autoLeave, ok := cc.EnterJoint(); ok {
 			return changer.EnterJoint(autoLeave, cc.Changes...)

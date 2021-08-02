@@ -28,7 +28,7 @@ type EntryType int32
 
 const (
 	EntryNormal       EntryType = 0
-	EntryConfChange   EntryType = 1
+	EntryConfChange   EntryType = 1 //配置更改entry
 	EntryConfChangeV2 EntryType = 2
 )
 
@@ -167,6 +167,7 @@ type ConfChangeTransition int32
 const (
 	// Automatically use the simple protocol if possible, otherwise fall back
 	// to ConfChangeJointImplicit. Most applications will want to use this.
+	// 自动使用简单策略
 	ConfChangeTransitionAuto ConfChangeTransition = 0
 	// Use joint consensus unconditionally, and transition out of them
 	// automatically (by proposing a zero configuration change).
@@ -174,11 +175,13 @@ const (
 	// This option is suitable for applications that want to minimize the time
 	// spent in the joint configuration and do not store the joint configuration
 	// in the state machine (outside of InitialState).
+	//无条件的使用共识，并自动的过渡到他们（自动过渡配置）
 	ConfChangeTransitionJointImplicit ConfChangeTransition = 1
 	// Use joint consensus and remain in the joint configuration until the
 	// application proposes a no-op configuration change. This is suitable for
 	// applications that want to explicitly control the transitions, for example
 	// to use a custom payload (via the Context field).
+	//使用共识，并且保留联合配置直到一个无操作的配置更改（手动过渡配置）
 	ConfChangeTransitionJointExplicit ConfChangeTransition = 2
 )
 
@@ -220,7 +223,7 @@ func (ConfChangeTransition) EnumDescriptor() ([]byte, []int) {
 type ConfChangeType int32
 
 const (
-	ConfChangeAddNode        ConfChangeType = 0
+	ConfChangeAddNode        ConfChangeType = 0 //添加节点
 	ConfChangeRemoveNode     ConfChangeType = 1
 	ConfChangeUpdateNode     ConfChangeType = 2
 	ConfChangeAddLearnerNode ConfChangeType = 3
@@ -638,9 +641,11 @@ var xxx_messageInfo_ConfChangeSingle proto.InternalMessageInfo
 //
 // [1]: https://github.com/ongardie/dissertation/blob/master/online-trim.pdf
 type ConfChangeV2 struct {
+	//联合配置的类型
 	Transition ConfChangeTransition `protobuf:"varint,1,opt,name=transition,enum=raftpb.ConfChangeTransition" json:"transition"`
-	Changes    []ConfChangeSingle   `protobuf:"bytes,2,rep,name=changes" json:"changes"`
-	Context    []byte               `protobuf:"bytes,3,opt,name=context" json:"context,omitempty"`
+	//配置更改列表，每一个为一个独立的配置更改操作，confChangeV2可以同时执行多个该操作
+	Changes []ConfChangeSingle `protobuf:"bytes,2,rep,name=changes" json:"changes"`
+	Context []byte             `protobuf:"bytes,3,opt,name=context" json:"context,omitempty"`
 }
 
 func (m *ConfChangeV2) Reset()         { *m = ConfChangeV2{} }

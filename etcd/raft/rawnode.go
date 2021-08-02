@@ -45,12 +45,12 @@ type RawNode struct {
 // state manually by setting up a Storage that has a first index > 1 and which
 // stores the desired ConfState as its InitialState.
 func NewRawNode(config *Config) (*RawNode, error) {
-	r := newRaft(config)
+	r := newRaft(config) //根据cfg信息创建raft
 	rn := &RawNode{
 		raft: r,
 	}
-	rn.prevSoftSt = r.softState()
-	rn.prevHardSt = r.hardState()
+	rn.prevSoftSt = r.softState() //设置raft的基本状态到rawNode
+	rn.prevHardSt = r.hardState() //设置raft节点信息到rawNode
 	return rn, nil
 }
 
@@ -138,41 +138,41 @@ func (rn *RawNode) readyWithoutAccept() Ready {
 // ahead and handle a Ready. Nothing must alter the state of the RawNode between
 // this call and the prior call to Ready().
 func (rn *RawNode) acceptReady(rd Ready) {
-	if rd.SoftState != nil {
+	if rd.SoftState != nil { //将当前的状态设置为下一条ready的pre状态
 		rn.prevSoftSt = rd.SoftState
 	}
-	if len(rd.ReadStates) != 0 {
+	if len(rd.ReadStates) != 0 { //清空下层raft待读取请求
 		rn.raft.readStates = nil
 	}
-	rn.raft.msgs = nil
+	rn.raft.msgs = nil //清空raft的消息队列
 }
 
 // HasReady called when RawNode user need to check if any Ready pending.
 // Checking logic in this method should be consistent with Ready.containsUpdates().
 func (rn *RawNode) HasReady() bool {
 	r := rn.raft
-	if !r.softState().equal(rn.prevSoftSt) {
+	if !r.softState().equal(rn.prevSoftSt) { //如果当前状态与上一次状态不相同，说明发生了一次变更，ready已准备好
 		return true
 	}
-	if hardSt := r.hardState(); !IsEmptyHardState(hardSt) && !isHardStateEqual(hardSt, rn.prevHardSt) {
+	if hardSt := r.hardState(); !IsEmptyHardState(hardSt) && !isHardStateEqual(hardSt, rn.prevHardSt) { //hardSt发生变化，ready已准备好
 		return true
 	}
-	if r.raftLog.hasPendingSnapshot() {
+	if r.raftLog.hasPendingSnapshot() { //有未应用的快照
 		return true
 	}
 	if len(r.msgs) > 0 || len(r.raftLog.unstableEntries()) > 0 || r.raftLog.hasNextEnts() {
 		return true
-	}
+	} //有未提交的消息/有未持久化的日志/有已提交但未应用的日志
 	if len(r.readStates) != 0 {
 		return true
-	}
+	} //有请求还未响应
 	return false
 }
 
 // Advance notifies the RawNode that the application has applied and saved progress in the
 // last Ready results.
 func (rn *RawNode) Advance(rd Ready) {
-	if !IsEmptyHardState(rd.HardState) {
+	if !IsEmptyHardState(rd.HardState) { //如果hardstate不为空，则将preHardSt更新为该值
 		rn.prevHardSt = rd.HardState
 	}
 	rn.raft.advance(rd)

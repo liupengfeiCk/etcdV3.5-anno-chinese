@@ -30,7 +30,8 @@ type Config struct {
 	// incoming configuration should be carried out automatically by Raft when
 	// this is possible. If false, the configuration will be joint until the
 	// application initiates the transition manually.
-	AutoLeave bool //TODO 不知道是啥
+	// 自动离开配置，为true时表示在联合配置中且会自动离开联合配置
+	AutoLeave bool
 	// Learners is a set of IDs corresponding to the learners active in the
 	// current configuration.
 	//

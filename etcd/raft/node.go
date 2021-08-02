@@ -75,6 +75,7 @@ type Ready struct {
 	Entries []pb.Entry
 
 	// Snapshot specifies the snapshot to be saved to stable storage.
+	//从unstable中读取的快照
 	Snapshot pb.Snapshot
 
 	// CommittedEntries specifies entries to be committed to a
@@ -86,10 +87,12 @@ type Ready struct {
 	// committed to stable storage.
 	// If it contains a MsgSnap message, the application MUST report back to raft
 	// when the snapshot has been received or has failed by calling ReportSnapshot.
+	//待发送的消息
 	Messages []pb.Message
 
 	// MustSync indicates whether the HardState and Entries must be synchronously
 	// written to disk or if an asynchronous write is permissible.
+	//是否同步
 	MustSync bool
 }
 
@@ -233,19 +236,21 @@ type Peer struct {
 // It appends a ConfChangeAddNode entry for each given peer to the initial log.
 //
 // Peers must not be zero length; call RestartNode in that case.
+// 初始化一个node
+// peers记录了当前集群中所有的id
 func StartNode(c *Config, peers []Peer) Node {
 	if len(peers) == 0 {
 		panic("no peers given; use RestartNode instead")
 	}
-	rn, err := NewRawNode(c)
+	rn, err := NewRawNode(c) //初始化一个RawNode，在其中初始化raft
 	if err != nil {
 		panic(err)
 	}
-	rn.Bootstrap(peers)
+	rn.Bootstrap(peers) //引导初始化对等方
 
-	n := newNode(rn)
+	n := newNode(rn) //以rawNode为基础创建一个node
 
-	go n.run()
+	go n.run() //运行这个节点
 	return &n
 }
 
@@ -253,8 +258,8 @@ func StartNode(c *Config, peers []Peer) Node {
 // The current membership of the cluster will be restored from the Storage.
 // If the caller has an existing state machine, pass in the last log index that
 // has been applied to it; otherwise use zero.
-func RestartNode(c *Config) Node {
-	rn, err := NewRawNode(c)
+func RestartNode(c *Config) Node { //重启节点
+	rn, err := NewRawNode(c) //直接通过cfg恢复节点
 	if err != nil {
 		panic(err)
 	}
@@ -270,16 +275,16 @@ type msgWithResult struct {
 
 // node is the canonical implementation of the Node interface
 type node struct {
-	propc      chan msgWithResult
-	recvc      chan pb.Message
-	confc      chan pb.ConfChangeV2
-	confstatec chan pb.ConfState
-	readyc     chan Ready
-	advancec   chan struct{}
-	tickc      chan struct{}
-	done       chan struct{}
-	stop       chan struct{}
-	status     chan chan Status
+	propc      chan msgWithResult   //该通道用于接收MsgProp类型的消息
+	recvc      chan pb.Message      //除MsgProp之外的其他消息都用这个通道接收
+	confc      chan pb.ConfChangeV2 //当节点收到EntryConfChange类型的entry记录时会转换成confChangeV2，并传入该通道中等待处理
+	confstatec chan pb.ConfState    //confState封装了当前集群中所有节点的id，该通道用于向上层返回confState实例
+	readyc     chan Ready           //用于向上层模块返回ready实例
+	advancec   chan struct{}        //当上层模块处理完通过readyc传入的ready实例后，会向该通道写入信号已通知下层模块
+	tickc      chan struct{}        //接收逻辑时钟发出的信号，根据角色来推进tick
+	done       chan struct{}        //当检测到done通道关闭时，在其上阻塞的goroutine会继续执行，并执行相关的关闭操作
+	stop       chan struct{}        //当node.Stop被调用时，向该通道发送信号，有另一个goroutine会尝试读取该信息以便于关闭自己
+	status     chan chan Status     //向上层模块传递Status实例
 
 	rn *RawNode
 }
@@ -326,9 +331,9 @@ func (n *node) run() {
 	lead := None
 
 	for {
-		if advancec != nil {
+		if advancec != nil { //如果advancec不为空，说明上一次的ready还未处理完，将readyc设为空
 			readyc = nil
-		} else if n.rn.HasReady() {
+		} else if n.rn.HasReady() { //如果ready已准备好
 			// Populate a Ready. Note that this Ready is not guaranteed to
 			// actually be handled. We will arm readyc, but there's no guarantee
 			// that we will actually send on it. It's possible that we will
@@ -337,30 +342,30 @@ func (n *node) run() {
 			// handled first, but it's generally good to emit larger Readys plus
 			// it simplifies testing (by emitting less frequently and more
 			// predictably).
-			rd = n.rn.readyWithoutAccept()
-			readyc = n.readyc
+			rd = n.rn.readyWithoutAccept() //读取并创建一个ready
+			readyc = n.readyc              //赋予ready频道
 		}
 
-		if lead != r.lead {
-			if r.hasLeader() {
+		if lead != r.lead { //检测当前lead是不是有变更
+			if r.hasLeader() { //当前节点如果为leader，则赋予prop频道，表示可以处理写请求
 				if lead == None {
 					r.logger.Infof("raft.node: %x elected leader %x at term %d", r.id, r.lead, r.Term)
 				} else {
 					r.logger.Infof("raft.node: %x changed leader from %x to %x at term %d", r.id, lead, r.lead, r.Term)
 				}
 				propc = n.propc
-			} else {
+			} else { //如果不为leader，则不可处理写请求
 				r.logger.Infof("raft.node: %x lost leader %x at term %d", r.id, lead, r.Term)
 				propc = nil
 			}
-			lead = r.lead
+			lead = r.lead //设置lead
 		}
 
 		select {
 		// TODO: maybe buffer the config propose if there exists one (the way
 		// described in raft dissertation)
 		// Currently it is dropped in Step silently.
-		case pm := <-propc:
+		case pm := <-propc: //接收prop写请求
 			m := pm.m
 			m.From = r.id
 			err := r.Step(m)
@@ -368,14 +373,14 @@ func (n *node) run() {
 				pm.result <- err
 				close(pm.result)
 			}
-		case m := <-n.recvc:
+		case m := <-n.recvc: //接收非prop请求
 			// filter out response message from unknown From.
 			if pr := r.prs.Progress[m.From]; pr != nil || !IsResponseMsg(m.Type) {
 				r.Step(m)
 			}
-		case cc := <-n.confc:
+		case cc := <-n.confc: //接收配置变更请求
 			_, okBefore := r.prs.Progress[r.id]
-			cs := r.applyConfChange(cc)
+			cs := r.applyConfChange(cc) //应用配置变更
 			// If the node was removed, block incoming proposals. Note that we
 			// only do this if the node was in the config before. Nodes may be
 			// a member of the group without knowing this (when they're catching
@@ -385,7 +390,7 @@ func (n *node) run() {
 			// NB: propc is reset when the leader changes, which, if we learn
 			// about it, sort of implies that we got readded, maybe? This isn't
 			// very sound and likely has bugs.
-			if _, okAfter := r.prs.Progress[r.id]; okBefore && !okAfter {
+			if _, okAfter := r.prs.Progress[r.id]; okBefore && !okAfter { //如果配置变更导致节点被删除
 				var found bool
 			outer:
 				for _, sl := range [][]uint64{cs.Voters, cs.VotersOutgoing} {
@@ -396,26 +401,26 @@ func (n *node) run() {
 						}
 					}
 				}
-				if !found {
+				if !found { //如果配置变更后，未在voters和votersOutgoing中找到该节点，则禁止其接收写请求，将propc设为nil
 					propc = nil
 				}
 			}
-			select {
+			select { //将更改后的配置发送到上层模块
 			case n.confstatec <- cs:
 			case <-n.done:
 			}
-		case <-n.tickc:
+		case <-n.tickc: //推动时钟
 			n.rn.Tick()
-		case readyc <- rd:
+		case readyc <- rd: //将rd发送到上层
 			n.rn.acceptReady(rd)
 			advancec = n.advancec
-		case <-advancec:
+		case <-advancec: //处理完ready后，上层会向此发送信号
 			n.rn.Advance(rd)
 			rd = Ready{}
 			advancec = nil
-		case c := <-n.status:
+		case c := <-n.status: //将当前状态传递给上层模块
 			c <- getStatus(r)
-		case <-n.stop:
+		case <-n.stop: //收到stop信号，关闭done通道
 			close(n.done)
 			return
 		}
@@ -515,7 +520,7 @@ func (n *node) stepWithWaitOption(ctx context.Context, m pb.Message, wait bool) 
 
 func (n *node) Ready() <-chan Ready { return n.readyc }
 
-func (n *node) Advance() {
+func (n *node) Advance() { //上层模块调用此方法通知下层raft消息已处理
 	select {
 	case n.advancec <- struct{}{}:
 	case <-n.done:
@@ -535,11 +540,11 @@ func (n *node) ApplyConfChange(cc pb.ConfChangeI) *pb.ConfState {
 	return &cs
 }
 
-func (n *node) Status() Status {
+func (n *node) Status() Status { //对外提供状态信息
 	c := make(chan Status)
 	select {
-	case n.status <- c:
-		return <-c
+	case n.status <- c: //将一个获取状态的频道发送给下层
+		return <-c //从下层获取状态
 	case <-n.done:
 		return Status{}
 	}
@@ -574,25 +579,29 @@ func (n *node) ReadIndex(ctx context.Context, rctx []byte) error {
 	return n.step(ctx, pb.Message{Type: pb.MsgReadIndex, Entries: []pb.Entry{{Data: rctx}}})
 }
 
+// prevSoftSt和prevHardSt是上一次创建ready实例时的状态
 func newReady(r *raft, prevSoftSt *SoftState, prevHardSt pb.HardState) Ready {
 	rd := Ready{
-		Entries:          r.raftLog.unstableEntries(),
+		// 获取unstable中的未持久化数据，这些数据将被交给上层
+		Entries: r.raftLog.unstableEntries(),
+		// 获取已提交但未应用的entry记录，及applied～commit之间的
 		CommittedEntries: r.raftLog.nextEnts(),
-		Messages:         r.msgs,
+		// 获取待发送的消息
+		Messages: r.msgs,
 	}
-	if softSt := r.softState(); !softSt.equal(prevSoftSt) {
+	if softSt := r.softState(); !softSt.equal(prevSoftSt) { //如果上一次到这一次之间state发生变化，则重设state
 		rd.SoftState = softSt
 	}
-	if hardSt := r.hardState(); !isHardStateEqual(hardSt, prevHardSt) {
+	if hardSt := r.hardState(); !isHardStateEqual(hardSt, prevHardSt) { //如果上一次到这一次之间state发生变化，则重设state
 		rd.HardState = hardSt
 	}
-	if r.raftLog.unstable.snapshot != nil {
+	if r.raftLog.unstable.snapshot != nil { //检测unstable中是否有快照数据，如果有，则设置快照数据到rd中
 		rd.Snapshot = *r.raftLog.unstable.snapshot
 	}
-	if len(r.readStates) != 0 {
+	if len(r.readStates) != 0 { //设置只读请求的结构响应
 		rd.ReadStates = r.readStates
 	}
-	rd.MustSync = MustSync(r.hardState(), prevHardSt, len(rd.Entries))
+	rd.MustSync = MustSync(r.hardState(), prevHardSt, len(rd.Entries)) //是否同步
 	return rd
 }
 

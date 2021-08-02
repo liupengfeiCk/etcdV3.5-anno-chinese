@@ -23,10 +23,10 @@ import (
 
 // Status contains information about this Raft peer and its view of the system.
 // The Progress is only populated on the leader.
-type Status struct {
-	BasicStatus
-	Config   tracker.Config
-	Progress map[uint64]tracker.Progress
+type Status struct { //raft的状态与配置
+	BasicStatus                             //rafr的基本状态
+	Config      tracker.Config              //raft的配置
+	Progress    map[uint64]tracker.Progress //如果是leader则存储了所有节点的progress
 }
 
 // BasicStatus contains basic information about the Raft peer. It does not allocate.
@@ -67,11 +67,11 @@ func getBasicStatus(r *raft) BasicStatus {
 // getStatus gets a copy of the current raft status.
 func getStatus(r *raft) Status {
 	var s Status
-	s.BasicStatus = getBasicStatus(r)
-	if s.RaftState == StateLeader {
-		s.Progress = getProgressCopy(r)
+	s.BasicStatus = getBasicStatus(r) //获取基本状态
+	if s.RaftState == StateLeader {   //如果是leader
+		s.Progress = getProgressCopy(r) //获取progress的拷贝
 	}
-	s.Config = r.prs.Config.Clone()
+	s.Config = r.prs.Config.Clone() //获取cfg的拷贝
 	return s
 }
 
