@@ -73,26 +73,26 @@ func (c ConfChangeV2) AsV1() (ConfChange, bool) { return ConfChange{}, false }
 // than one change or if the use of Joint Consensus was requested explicitly.
 // The first bool can only be true if second one is, and indicates whether the
 // Joint State will be left automatically.
-func (c ConfChangeV2) EnterJoint() (autoLeave bool, ok bool) {
+func (c ConfChangeV2) EnterJoint() (autoLeave bool, ok bool) { //进入联合配置
 	// NB: in theory, more config changes could qualify for the "simple"
 	// protocol but it depends on the config on top of which the changes apply.
 	// For example, adding two learners is not OK if both nodes are part of the
 	// base config (i.e. two voters are turned into learners in the process of
 	// applying the conf change). In practice, these distinctions should not
 	// matter, so we keep it simple and use Joint Consensus liberally.
-	if c.Transition != ConfChangeTransitionAuto || len(c.Changes) > 1 {
+	if c.Transition != ConfChangeTransitionAuto || len(c.Changes) > 1 { //如果不是简单配置或者配置操作大于1
 		// Use Joint Consensus.
 		var autoLeave bool
-		switch c.Transition {
-		case ConfChangeTransitionAuto:
+		switch c.Transition { //获取配置类型
+		case ConfChangeTransitionAuto: //如果是简单配置，则autoLeave为true
 			autoLeave = true
-		case ConfChangeTransitionJointImplicit:
+		case ConfChangeTransitionJointImplicit: //如果是自动离开配置，则autoLeave为true
 			autoLeave = true
-		case ConfChangeTransitionJointExplicit:
+		case ConfChangeTransitionJointExplicit: //手动配置，不操作
 		default:
 			panic(fmt.Sprintf("unknown transition: %+v", c))
 		}
-		return autoLeave, true
+		return autoLeave, true //返回autoLeave标志，和是否进入联合配置的标志
 	}
 	return false, false
 }

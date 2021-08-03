@@ -1637,26 +1637,26 @@ func (r *raft) promotable() bool {
 	return pr != nil && !pr.IsLearner && !r.raftLog.hasPendingSnapshot()
 }
 
-func (r *raft) applyConfChange(cc pb.ConfChangeV2) pb.ConfState {
+func (r *raft) applyConfChange(cc pb.ConfChangeV2) pb.ConfState { //更新配置到raft
 	cfg, prs, err := func() (tracker.Config, tracker.ProgressMap, error) {
 		changer := confchange.Changer{ //创建一个changer实例
 			Tracker:   r.prs,                 //获取prs
 			LastIndex: r.raftLog.lastIndex(), //获取日志最后一条记录
 		}
-		if cc.LeaveJoint() { //如果是一个空配置
-			return changer.LeaveJoint()
-		} else if autoLeave, ok := cc.EnterJoint(); ok {
-			return changer.EnterJoint(autoLeave, cc.Changes...)
+		if cc.LeaveJoint() { //如果是一个空配置，则进行一次自动离开的尝试
+			return changer.LeaveJoint() //尝试自动离开联合配置
+		} else if autoLeave, ok := cc.EnterJoint(); ok { //判断是否进入联合配置
+			return changer.EnterJoint(autoLeave, cc.Changes...) //进入联合配置
 		}
-		return changer.Simple(cc.Changes...)
-	}()
+		return changer.Simple(cc.Changes...) //使用简单配置
+	}() //对配置进行更新
 
-	if err != nil {
+	if err != nil { //如果出错，直接终止
 		// TODO(tbg): return the error to the caller.
 		panic(err)
 	}
 
-	return r.switchToConfig(cfg, prs)
+	return r.switchToConfig(cfg, prs) //重新设置配置，并返回raft状态
 }
 
 // switchToConfig reconfigures this node to use the provided configuration. It
@@ -1666,18 +1666,18 @@ func (r *raft) applyConfChange(cc pb.ConfChangeV2) pb.ConfState {
 //
 // The inputs usually result from restoring a ConfState or applying a ConfChange.
 func (r *raft) switchToConfig(cfg tracker.Config, prs tracker.ProgressMap) pb.ConfState {
-	r.prs.Config = cfg
-	r.prs.Progress = prs
+	r.prs.Config = cfg   //重新设置cfg
+	r.prs.Progress = prs //重新设置prs
 
 	r.logger.Infof("%x switched to configuration %s", r.id, r.prs.Config)
-	cs := r.prs.ConfState()
-	pr, ok := r.prs.Progress[r.id]
+	cs := r.prs.ConfState()        //获取现在的配置
+	pr, ok := r.prs.Progress[r.id] //获取当前节点的pr
 
 	// Update whether the node itself is a learner, resetting to false when the
 	// node is removed.
-	r.isLearner = ok && pr.IsLearner
+	r.isLearner = ok && pr.IsLearner //当前节点是否为学习者
 
-	if (!ok || r.isLearner) && r.state == StateLeader {
+	if (!ok || r.isLearner) && r.state == StateLeader { //如果当前节点未获取到pr，或者当前节点为learner，并且他的状态还是leader，则直接返回，为啥？
 		// This node is leader and was removed or demoted. We prevent demotions
 		// at the time writing but hypothetically we handle them the same way as
 		// removing the leader: stepping down into the next Term.
@@ -1692,15 +1692,15 @@ func (r *raft) switchToConfig(cfg tracker.Config, prs tracker.ProgressMap) pb.Co
 
 	// The remaining steps only make sense if this node is the leader and there
 	// are other nodes.
-	if r.state != StateLeader || len(cs.Voters) == 0 {
+	if r.state != StateLeader || len(cs.Voters) == 0 { //如果当前不是leader，或者选民为空，直接返回，为啥？
 		return cs
 	}
 
-	if r.maybeCommit() {
+	if r.maybeCommit() { //尝试提交，如果提交成功则向其他节点发送MsgApp，且entry可以为空
 		// If the configuration change means that more entries are committed now,
 		// broadcast/append to everyone in the updated config.
 		r.bcastAppend()
-	} else {
+	} else { //否则向其他节点同步数据
 		// Otherwise, still probe the newly added replicas; there's no reason to
 		// let them wait out a heartbeat interval (or the next incoming
 		// proposal).
@@ -1709,7 +1709,7 @@ func (r *raft) switchToConfig(cfg tracker.Config, prs tracker.ProgressMap) pb.Co
 		})
 	}
 	// If the the leadTransferee was removed or demoted, abort the leadership transfer.
-	if _, tOK := r.prs.Config.Voters.IDs()[r.leadTransferee]; !tOK && r.leadTransferee != 0 {
+	if _, tOK := r.prs.Config.Voters.IDs()[r.leadTransferee]; !tOK && r.leadTransferee != 0 { //如果获取不到节点转移目标，则终止转移
 		r.abortLeaderTransfer()
 	}
 

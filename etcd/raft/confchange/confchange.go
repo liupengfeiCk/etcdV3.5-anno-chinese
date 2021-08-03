@@ -47,32 +47,32 @@ type Changer struct {
 //
 // [1]: https://github.com/ongardie/dissertation/blob/master/online-trim.pdf
 func (c Changer) EnterJoint(autoLeave bool, ccs ...pb.ConfChangeSingle) (tracker.Config, tracker.ProgressMap, error) {
-	cfg, prs, err := c.checkAndCopy()
+	cfg, prs, err := c.checkAndCopy() //检查和拷贝配置
 	if err != nil {
 		return c.err(err)
 	}
-	if joint(cfg) {
+	if joint(cfg) { //如果已经是联合配置，不能再次进入联合配置
 		err := errors.New("config is already joint")
 		return c.err(err)
 	}
-	if len(incoming(cfg.Voters)) == 0 {
+	if len(incoming(cfg.Voters)) == 0 { //选民不能为空
 		// We allow adding nodes to an empty config for convenience (testing and
 		// bootstrap), but you can't enter a joint state.
 		err := errors.New("can't make a zero-voter config joint")
 		return c.err(err)
 	}
 	// Clear the outgoing config.
-	*outgoingPtr(&cfg.Voters) = quorum.MajorityConfig{}
+	*outgoingPtr(&cfg.Voters) = quorum.MajorityConfig{} //清空outgoing
 	// Copy incoming to outgoing.
-	for id := range incoming(cfg.Voters) {
+	for id := range incoming(cfg.Voters) { //将incoming拷贝到outgoing
 		outgoing(cfg.Voters)[id] = struct{}{}
 	}
 
 	if err := c.apply(&cfg, prs, ccs...); err != nil {
 		return c.err(err)
 	}
-	cfg.AutoLeave = autoLeave
-	return checkAndReturn(cfg, prs)
+	cfg.AutoLeave = autoLeave       //设置自动离开标志
+	return checkAndReturn(cfg, prs) //检查并返回
 }
 
 // LeaveJoint transitions out of a joint configuration. It is an error to call
@@ -89,37 +89,37 @@ func (c Changer) EnterJoint(autoLeave bool, ccs ...pb.ConfChangeSingle) (tracker
 // inserted into Learners.
 //
 // [1]: https://github.com/ongardie/dissertation/blob/master/online-trim.pdf
-func (c Changer) LeaveJoint() (tracker.Config, tracker.ProgressMap, error) {
+func (c Changer) LeaveJoint() (tracker.Config, tracker.ProgressMap, error) { //离开联合配置
 	cfg, prs, err := c.checkAndCopy() //检查配置是否合法
-	if err != nil {
+	if err != nil {                   //如果有错，返回错误并退出
 		return c.err(err)
 	}
-	if !joint(cfg) {
+	if !joint(cfg) { //如果不是联合配置，则无法离开联合配置，报错
 		err := errors.New("can't leave a non-joint config")
 		return c.err(err)
 	}
-	if len(outgoing(cfg.Voters)) == 0 {
+	if len(outgoing(cfg.Voters)) == 0 { //如果voters[1]为0，也不是联合配置
 		err := fmt.Errorf("configuration is not joint: %v", cfg)
 		return c.err(err)
 	}
-	for id := range cfg.LearnersNext {
+	for id := range cfg.LearnersNext { //将LearnersNext中的节点设置为学习者
 		nilAwareAdd(&cfg.Learners, id)
 		prs[id].IsLearner = true
 	}
-	cfg.LearnersNext = nil
+	cfg.LearnersNext = nil //清空LearnersNext
 
 	for id := range outgoing(cfg.Voters) {
-		_, isVoter := incoming(cfg.Voters)[id]
-		_, isLearner := cfg.Learners[id]
+		_, isVoter := incoming(cfg.Voters)[id] //判断outgoing中的节点是否在income中
+		_, isLearner := cfg.Learners[id]       //判断outgoing中的节点是否还是学习者
 
-		if !isVoter && !isLearner {
-			delete(prs, id)
+		if !isVoter && !isLearner { //如果都不在
+			delete(prs, id) //删除该节点的prs
 		}
 	}
-	*outgoingPtr(&cfg.Voters) = nil
-	cfg.AutoLeave = false
+	*outgoingPtr(&cfg.Voters) = nil //将outgoing设置为空
+	cfg.AutoLeave = false           //将自动离开标志设置为false
 
-	return checkAndReturn(cfg, prs)
+	return checkAndReturn(cfg, prs) //检查配置并返回
 }
 
 // Simple carries out a series of configuration changes that (in aggregate)
@@ -128,28 +128,28 @@ func (c Changer) LeaveJoint() (tracker.Config, tracker.ProgressMap, error) {
 // zero, or if the configuration is in a joint state (i.e. if there is an
 // outgoing configuration).
 func (c Changer) Simple(ccs ...pb.ConfChangeSingle) (tracker.Config, tracker.ProgressMap, error) {
-	cfg, prs, err := c.checkAndCopy()
+	cfg, prs, err := c.checkAndCopy() //检查与拷贝配置
 	if err != nil {
 		return c.err(err)
 	}
-	if joint(cfg) {
+	if joint(cfg) { //simple不能是联合配置
 		err := errors.New("can't apply simple config change in joint config")
 		return c.err(err)
 	}
 	if err := c.apply(&cfg, prs, ccs...); err != nil {
 		return c.err(err)
-	}
-	if n := symdiff(incoming(c.Tracker.Voters), incoming(cfg.Voters)); n > 1 {
+	} //添加配置
+	if n := symdiff(incoming(c.Tracker.Voters), incoming(cfg.Voters)); n > 1 { //如果更新了多个选民，不能使用联合配置
 		return tracker.Config{}, nil, errors.New("more than one voter changed without entering joint config")
 	}
 
-	return checkAndReturn(cfg, prs)
+	return checkAndReturn(cfg, prs) //检查并返回
 }
 
 // apply a change to the configuration. By convention, changes to voters are
 // always made to the incoming majority config Voters[0]. Voters[1] is either
 // empty or preserves the outgoing majority configuration while in a joint state.
-func (c Changer) apply(cfg *tracker.Config, prs tracker.ProgressMap, ccs ...pb.ConfChangeSingle) error {
+func (c Changer) apply(cfg *tracker.Config, prs tracker.ProgressMap, ccs ...pb.ConfChangeSingle) error { //应用配置更改
 	for _, cc := range ccs {
 		if cc.NodeID == 0 {
 			// etcd replaces the NodeID with zero if it decides (downstream of
@@ -157,19 +157,19 @@ func (c Changer) apply(cfg *tracker.Config, prs tracker.ProgressMap, ccs ...pb.C
 			// here to ignore these.
 			continue
 		}
-		switch cc.Type {
-		case pb.ConfChangeAddNode:
+		switch cc.Type { //根据配置更改类型执行操作
+		case pb.ConfChangeAddNode: //如果是add节点
 			c.makeVoter(cfg, prs, cc.NodeID)
-		case pb.ConfChangeAddLearnerNode:
+		case pb.ConfChangeAddLearnerNode: //如果是add学习者
 			c.makeLearner(cfg, prs, cc.NodeID)
-		case pb.ConfChangeRemoveNode:
+		case pb.ConfChangeRemoveNode: //如果是删除node
 			c.remove(cfg, prs, cc.NodeID)
-		case pb.ConfChangeUpdateNode:
+		case pb.ConfChangeUpdateNode: //如果是更新node，不操作
 		default:
 			return fmt.Errorf("unexpected conf type %d", cc.Type)
 		}
 	}
-	if len(incoming(cfg.Voters)) == 0 {
+	if len(incoming(cfg.Voters)) == 0 { //如果节点更新后，没有了选民，则报错
 		return errors.New("removed all voters")
 	}
 	return nil
@@ -177,13 +177,13 @@ func (c Changer) apply(cfg *tracker.Config, prs tracker.ProgressMap, ccs ...pb.C
 
 // makeVoter adds or promotes the given ID to be a voter in the incoming
 // majority config.
-func (c Changer) makeVoter(cfg *tracker.Config, prs tracker.ProgressMap, id uint64) {
+func (c Changer) makeVoter(cfg *tracker.Config, prs tracker.ProgressMap, id uint64) { //创建并初始化prs，否则就更新
 	pr := prs[id]
 	if pr == nil {
 		c.initProgress(cfg, prs, id, false /* isLearner */)
 		return
 	}
-
+	//如果当前节点是学习者，则将其从学习者和即将成为学习者的集合中移除，并将其加入到incoming
 	pr.IsLearner = false
 	nilAwareDelete(&cfg.Learners, id)
 	nilAwareDelete(&cfg.LearnersNext, id)
@@ -203,27 +203,27 @@ func (c Changer) makeVoter(cfg *tracker.Config, prs tracker.ProgressMap, id uint
 // simultaneously. Instead, we add the learner to LearnersNext, so that it will
 // be added to Learners the moment the outgoing config is removed by
 // LeaveJoint().
-func (c Changer) makeLearner(cfg *tracker.Config, prs tracker.ProgressMap, id uint64) {
+func (c Changer) makeLearner(cfg *tracker.Config, prs tracker.ProgressMap, id uint64) { //创建并初始化学习者prs，有就更新
 	pr := prs[id]
-	if pr == nil {
+	if pr == nil { //初始化
 		c.initProgress(cfg, prs, id, true /* isLearner */)
 		return
 	}
-	if pr.IsLearner {
+	if pr.IsLearner { //如果已经是学习者
 		return
 	}
 	// Remove any existing voter in the incoming config...
-	c.remove(cfg, prs, id)
+	c.remove(cfg, prs, id) //先从incoming中删除
 	// ... but save the Progress.
-	prs[id] = pr
+	prs[id] = pr //再将pr恢复
 	// Use LearnersNext if we can't add the learner to Learners directly, i.e.
 	// if the peer is still tracked as a voter in the outgoing config. It will
 	// be turned into a learner in LeaveJoint().
 	//
 	// Otherwise, add a regular learner right away.
-	if _, onRight := outgoing(cfg.Voters)[id]; onRight {
+	if _, onRight := outgoing(cfg.Voters)[id]; onRight { //如果其在outgoing中，则将其加入到即将成为学习者集合
 		nilAwareAdd(&cfg.LearnersNext, id)
-	} else {
+	} else { //否则将其直接加入学习者集合
 		pr.IsLearner = true
 		nilAwareAdd(&cfg.Learners, id)
 	}
@@ -233,14 +233,14 @@ func (c Changer) makeLearner(cfg *tracker.Config, prs tracker.ProgressMap, id ui
 func (c Changer) remove(cfg *tracker.Config, prs tracker.ProgressMap, id uint64) {
 	if _, ok := prs[id]; !ok {
 		return
-	}
+	} //如果找不到pr，直接返回
 
-	delete(incoming(cfg.Voters), id)
-	nilAwareDelete(&cfg.Learners, id)
-	nilAwareDelete(&cfg.LearnersNext, id)
+	delete(incoming(cfg.Voters), id)      //从incoming中删除该节点
+	nilAwareDelete(&cfg.Learners, id)     //从学习者中删除该节点
+	nilAwareDelete(&cfg.LearnersNext, id) //从即将成为学习者集合中删除该节点
 
 	// If the peer is still a voter in the outgoing config, keep the Progress.
-	if _, onRight := outgoing(cfg.Voters)[id]; !onRight {
+	if _, onRight := outgoing(cfg.Voters)[id]; !onRight { //如果其不在outgoing中，删除该节点的prs
 		delete(prs, id)
 	}
 }

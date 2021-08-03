@@ -401,7 +401,7 @@ func (n *node) run() {
 						}
 					}
 				}
-				if !found { //如果配置变更后，未在voters和votersOutgoing中找到该节点，则禁止其接收写请求，将propc设为nil
+				if !found { //如果配置变更后，未在voters和votersOutgoing中找到该节点，则禁止其接收写请求，将propc设为nil（变成了学习者，或者直接下线了）
 					propc = nil
 				}
 			}
@@ -444,13 +444,13 @@ func (n *node) Propose(ctx context.Context, data []byte) error {
 	return n.stepWait(ctx, pb.Message{Type: pb.MsgProp, Entries: []pb.Entry{{Data: data}}})
 }
 
-func (n *node) Step(ctx context.Context, m pb.Message) error {
+func (n *node) Step(ctx context.Context, m pb.Message) error { //从其他节点获取网络消息
 	// ignore unexpected local messages receiving over network
-	if IsLocalMsg(m.Type) {
+	if IsLocalMsg(m.Type) { //如果是本地消息，则不处理
 		// TODO: return an error?
 		return nil
 	}
-	return n.step(ctx, m)
+	return n.step(ctx, m) //实际处理消息的方法
 }
 
 func confChangeToMsg(c pb.ConfChangeI) (pb.Message, error) {
@@ -469,20 +469,20 @@ func (n *node) ProposeConfChange(ctx context.Context, cc pb.ConfChangeI) error {
 	return n.Step(ctx, msg)
 }
 
-func (n *node) step(ctx context.Context, m pb.Message) error {
+func (n *node) step(ctx context.Context, m pb.Message) error { //处理消息，wait标志为false表示不是同步消息
 	return n.stepWithWaitOption(ctx, m, false)
 }
 
-func (n *node) stepWait(ctx context.Context, m pb.Message) error {
+func (n *node) stepWait(ctx context.Context, m pb.Message) error { //处理消息，wait标志为true表示是同步消息
 	return n.stepWithWaitOption(ctx, m, true)
 }
 
 // Step advances the state machine using msgs. The ctx.Err() will be returned,
 // if any.
 func (n *node) stepWithWaitOption(ctx context.Context, m pb.Message, wait bool) error {
-	if m.Type != pb.MsgProp {
+	if m.Type != pb.MsgProp { //如果不是写入消息
 		select {
-		case n.recvc <- m:
+		case n.recvc <- m: //将消息发送到recvc通道
 			return nil
 		case <-ctx.Done():
 			return ctx.Err()
@@ -490,14 +490,15 @@ func (n *node) stepWithWaitOption(ctx context.Context, m pb.Message, wait bool) 
 			return ErrStopped
 		}
 	}
+	// 如果是写入消息
 	ch := n.propc
 	pm := msgWithResult{m: m}
-	if wait {
+	if wait { //如果同步，则创建一个通道
 		pm.result = make(chan error, 1)
 	}
 	select {
-	case ch <- pm:
-		if !wait {
+	case ch <- pm: //发送写入消息到下层
+		if !wait { //如果不是同步，则直接返回
 			return nil
 		}
 	case <-ctx.Done():
@@ -506,8 +507,8 @@ func (n *node) stepWithWaitOption(ctx context.Context, m pb.Message, wait bool) 
 		return ErrStopped
 	}
 	select {
-	case err := <-pm.result:
-		if err != nil {
+	case err := <-pm.result: //如果是同步，会接收到下层往上传递到一个信号
+		if err != nil { //这个信号中如果带了错误，则返回错误
 			return err
 		}
 	case <-ctx.Done():

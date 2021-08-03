@@ -570,7 +570,7 @@ var xxx_messageInfo_ConfChange proto.InternalMessageInfo
 
 // ConfChangeSingle is an individual configuration change operation. Multiple
 // such operations can be carried out atomically via a ConfChangeV2.
-type ConfChangeSingle struct {
+type ConfChangeSingle struct { //一个独立的配置更改
 	Type   ConfChangeType `protobuf:"varint,1,opt,name=type,enum=raftpb.ConfChangeType" json:"type"`
 	NodeID uint64         `protobuf:"varint,2,opt,name=node_id,json=nodeId" json:"node_id"`
 }
