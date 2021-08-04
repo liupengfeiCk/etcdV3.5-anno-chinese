@@ -72,6 +72,7 @@ type Ready struct {
 	// Entries specifies entries to be saved to stable storage BEFORE
 	// Messages are sent.
 	//从unstable中读取出来，被上层模块保存到Storage中
+	//未持久化的entry
 	Entries []pb.Entry
 
 	// Snapshot specifies the snapshot to be saved to stable storage.
@@ -81,6 +82,7 @@ type Ready struct {
 	// CommittedEntries specifies entries to be committed to a
 	// store/state-machine. These have previously been committed to stable
 	// store.
+	// 已提交待应用的entry
 	CommittedEntries []pb.Entry
 
 	// Messages specifies outbound messages to be sent AFTER Entries are

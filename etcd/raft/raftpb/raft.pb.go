@@ -306,10 +306,13 @@ func (m *Entry) XXX_DiscardUnknown() {
 
 var xxx_messageInfo_Entry proto.InternalMessageInfo
 
-type SnapshotMetadata struct {
+type SnapshotMetadata struct { //快照元数据
+	// conf状态
 	ConfState ConfState `protobuf:"bytes,1,opt,name=conf_state,json=confState" json:"conf_state"`
-	Index     uint64    `protobuf:"varint,2,opt,name=index" json:"index"`
-	Term      uint64    `protobuf:"varint,3,opt,name=term" json:"term"`
+	// 最后一条记录的index
+	Index uint64 `protobuf:"varint,2,opt,name=index" json:"index"`
+	// 最后一条记录的索引
+	Term uint64 `protobuf:"varint,3,opt,name=term" json:"term"`
 }
 
 func (m *SnapshotMetadata) Reset()         { *m = SnapshotMetadata{} }
