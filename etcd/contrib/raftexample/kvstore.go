@@ -27,9 +27,13 @@ import (
 
 // a key-value store backed by raft
 type kvstore struct {
-	proposeC    chan<- string // channel for proposing updates
-	mu          sync.RWMutex
-	kvStore     map[string]string // current committed key-value pairs
+	// 客户端的写入请求通过这个chan传递
+	proposeC chan<- string // channel for proposing updates
+	// 资源锁
+	mu sync.RWMutex
+	// 用来存储kv的持久化结构，这里因为是示例，所以直接用map代替
+	kvStore map[string]string // current committed key-value pairs
+	// 负责读取快照文件
 	snapshotter *snap.Snapshotter
 }
 
@@ -70,14 +74,15 @@ func (s *kvstore) Propose(k string, v string) {
 	s.proposeC <- buf.String()
 }
 
-func (s *kvstore) readCommits(commitC <-chan *commit, errorC <-chan error) {
+func (s *kvstore) readCommits(commitC <-chan *commit, errorC <-chan error) { //读取commit的entry，并持久化进storage
 	for commit := range commitC {
-		if commit == nil {
+		if commit == nil { //当commit为空，则表示是存储快照数据
 			// signaled to load snapshot
-			snapshot, err := s.loadSnapshot()
+			snapshot, err := s.loadSnapshot() //读取快照
 			if err != nil {
 				log.Panic(err)
 			}
+			// 写入快照到storage
 			if snapshot != nil {
 				log.Printf("loading snapshot at term %d and index %d", snapshot.Metadata.Term, snapshot.Metadata.Index)
 				if err := s.recoverFromSnapshot(snapshot.Data); err != nil {
@@ -87,6 +92,7 @@ func (s *kvstore) readCommits(commitC <-chan *commit, errorC <-chan error) {
 			continue
 		}
 
+		// 写入kv到storage
 		for _, data := range commit.data {
 			var dataKv kv
 			dec := gob.NewDecoder(bytes.NewBufferString(data))
@@ -97,6 +103,7 @@ func (s *kvstore) readCommits(commitC <-chan *commit, errorC <-chan error) {
 			s.kvStore[dataKv.Key] = dataKv.Val
 			s.mu.Unlock()
 		}
+		// 写入成功，发送完成信号
 		close(commit.applyDoneC)
 	}
 	if err, ok := <-errorC; ok {
@@ -121,13 +128,14 @@ func (s *kvstore) loadSnapshot() (*raftpb.Snapshot, error) {
 	return snapshot, nil
 }
 
+// 将快照反序列化以得到一个map
 func (s *kvstore) recoverFromSnapshot(snapshot []byte) error {
 	var store map[string]string
 	if err := json.Unmarshal(snapshot, &store); err != nil {
 		return err
-	}
+	} //快照反序列化
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.kvStore = store
+	s.kvStore = store //替换store
 	return nil
 }

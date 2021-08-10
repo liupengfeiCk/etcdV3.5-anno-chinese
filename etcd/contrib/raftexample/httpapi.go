@@ -25,15 +25,19 @@ import (
 
 // Handler for a http based key-value store backed by raft
 type httpKVAPI struct {
-	store       *kvstore
+	// 持久化存储
+	store *kvstore
+	// 当用户发送post请求时会认为是发送了一个集群节点增加的请求，httpKVAPI会将其写入confChangeC频道中
 	confChangeC chan<- raftpb.ConfChange
 }
 
 func (h *httpKVAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// 获取请求的url作为键
 	key := r.RequestURI
 	defer r.Body.Close()
 	switch {
-	case r.Method == "PUT":
+	case r.Method == "PUT": // put请求
+		// 读取put请求体
 		v, err := ioutil.ReadAll(r.Body)
 		if err != nil {
 			log.Printf("Failed to read on PUT (%v)\n", err)
@@ -41,25 +45,29 @@ func (h *httpKVAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// 对键值对进行序列化，之后将其写入到proposeC通道中
 		h.store.Propose(key, string(v))
 
 		// Optimistic-- no waiting for ack from raft. Value is not yet
 		// committed so a subsequent GET on the key may return old value
+		// 向用户返回响应状态码
 		w.WriteHeader(http.StatusNoContent)
-	case r.Method == "GET":
+	case r.Method == "GET": // get请求
+		// 直接从kvStorage中读取键值对给客户端
 		if v, ok := h.store.Lookup(key); ok {
 			w.Write([]byte(v))
 		} else {
 			http.Error(w, "Failed to GET", http.StatusNotFound)
 		}
-	case r.Method == "POST":
-		url, err := ioutil.ReadAll(r.Body)
+	case r.Method == "POST": // post请求
+		url, err := ioutil.ReadAll(r.Body) //读取
 		if err != nil {
 			log.Printf("Failed to read on POST (%v)\n", err)
 			http.Error(w, "Failed on POST", http.StatusBadRequest)
 			return
 		}
 
+		// 从key中解析nodeId
 		nodeId, err := strconv.ParseUint(key[1:], 0, 64)
 		if err != nil {
 			log.Printf("Failed to convert ID for conf change (%v)\n", err)
@@ -67,16 +75,20 @@ func (h *httpKVAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// 创建cc
 		cc := raftpb.ConfChange{
 			Type:    raftpb.ConfChangeAddNode,
 			NodeID:  nodeId,
 			Context: url,
 		}
+		// 将cc从confChangeC发往下层
 		h.confChangeC <- cc
 
 		// As above, optimistic that raft will apply the conf change
+		// 设置响应返回状态码
 		w.WriteHeader(http.StatusNoContent)
-	case r.Method == "DELETE":
+	case r.Method == "DELETE": //delete请求
+		// 解析出nodeId
 		nodeId, err := strconv.ParseUint(key[1:], 0, 64)
 		if err != nil {
 			log.Printf("Failed to convert ID for conf change (%v)\n", err)
@@ -84,13 +96,16 @@ func (h *httpKVAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// 创建cc
 		cc := raftpb.ConfChange{
 			Type:   raftpb.ConfChangeRemoveNode,
 			NodeID: nodeId,
 		}
+		// 发送cc
 		h.confChangeC <- cc
 
 		// As above, optimistic that raft will apply the conf change
+		// 设置状态码
 		w.WriteHeader(http.StatusNoContent)
 	default:
 		w.Header().Set("Allow", "PUT")
@@ -102,7 +117,9 @@ func (h *httpKVAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // serveHttpKVAPI starts a key-value server with a GET/PUT API and listens.
+// 用于监听指定的http地址
 func serveHttpKVAPI(kv *kvstore, port int, confChangeC chan<- raftpb.ConfChange, errorC <-chan error) {
+	// 创建server
 	srv := http.Server{
 		Addr: ":" + strconv.Itoa(port),
 		Handler: &httpKVAPI{
@@ -110,6 +127,7 @@ func serveHttpKVAPI(kv *kvstore, port int, confChangeC chan<- raftpb.ConfChange,
 			confChangeC: confChangeC,
 		},
 	}
+	// 另开一个线程监听server
 	go func() {
 		if err := srv.ListenAndServe(); err != nil {
 			log.Fatal(err)
@@ -117,6 +135,7 @@ func serveHttpKVAPI(kv *kvstore, port int, confChangeC chan<- raftpb.ConfChange,
 	}()
 
 	// exit when raft goes down
+	// 阻塞并等待err信号
 	if err, ok := <-errorC; ok {
 		log.Fatal(err)
 	}

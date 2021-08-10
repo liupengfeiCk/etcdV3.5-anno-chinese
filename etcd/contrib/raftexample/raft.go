@@ -141,6 +141,7 @@ func newRaftNode(id int, peers []string, join bool, getSnapshot func() ([]byte, 
 }
 
 func (rc *raftNode) saveSnap(snap raftpb.Snapshot) error {
+	// 创建wal快照
 	walSnap := walpb.Snapshot{
 		Index:     snap.Metadata.Index,
 		Term:      snap.Metadata.Term,
@@ -149,31 +150,40 @@ func (rc *raftNode) saveSnap(snap raftpb.Snapshot) error {
 	// save the snapshot file before writing the snapshot to the wal.
 	// This makes it possible for the snapshot file to become orphaned, but prevents
 	// a WAL snapshot entry from having no corresponding snapshot file.
+	// 将快照写入快照文件
 	if err := rc.snapshotter.SaveSnap(snap); err != nil {
 		return err
 	}
+	// 将快照写入wal文件
 	if err := rc.wal.SaveSnapshot(walSnap); err != nil {
 		return err
 	}
+
+	//根据快照元数据信息，释放无用的wal日志
 	return rc.wal.ReleaseLockTo(snap.Metadata.Index)
 }
 
+// 处理已提交待应用的entry，分割出可以提交的部分
 func (rc *raftNode) entriesToApply(ents []raftpb.Entry) (nents []raftpb.Entry) {
 	if len(ents) == 0 {
 		return ents
 	}
 	firstIdx := ents[0].Index
+	// 如果第一条大于了已应用索引 + 1 说明不是该已应用索引的下一条entry，报错，程序结束
 	if firstIdx > rc.appliedIndex+1 {
 		log.Fatalf("first index of committed entry[%d] should <= progress.appliedIndex[%d]+1", firstIdx, rc.appliedIndex)
 	}
+	// 分割需要提交的entry
 	if rc.appliedIndex-firstIdx+1 < uint64(len(ents)) {
 		nents = ents[rc.appliedIndex-firstIdx+1:]
 	}
+	// 将需要提交的entry返回
 	return nents
 }
 
 // publishEntries writes committed log entries to commit channel and returns
 // whether all entries could be published.
+// 将所有的entry提交给上层，上层存储到kvStorage中
 func (rc *raftNode) publishEntries(ents []raftpb.Entry) (<-chan struct{}, bool) {
 	if len(ents) == 0 {
 		return nil, true
@@ -182,34 +192,40 @@ func (rc *raftNode) publishEntries(ents []raftpb.Entry) (<-chan struct{}, bool) 
 	data := make([]string, 0, len(ents))
 	for i := range ents {
 		switch ents[i].Type {
-		case raftpb.EntryNormal:
-			if len(ents[i].Data) == 0 {
+		case raftpb.EntryNormal: //如果说普通entry
+			if len(ents[i].Data) == 0 { //检测是否携带数据
 				// ignore empty messages
 				break
 			}
-			s := string(ents[i].Data)
-			data = append(data, s)
-		case raftpb.EntryConfChange:
+			s := string(ents[i].Data) //将数据转换为string
+			data = append(data, s)    //放入data中
+		case raftpb.EntryConfChange: //如果是配置更改entry
+			// 将confChangeEntry封装成ConfChange类型
 			var cc raftpb.ConfChange
 			cc.Unmarshal(ents[i].Data)
+			// 将cc传入底层raft，进行配置更改
 			rc.confState = *rc.node.ApplyConfChange(cc)
-			switch cc.Type {
-			case raftpb.ConfChangeAddNode:
+			switch cc.Type { //判断cc的类型
+			case raftpb.ConfChangeAddNode: //如果是增加节点
 				if len(cc.Context) > 0 {
+					// 为网络层增加对等方节点
 					rc.transport.AddPeer(types.ID(cc.NodeID), []string{string(cc.Context)})
 				}
-			case raftpb.ConfChangeRemoveNode:
-				if cc.NodeID == uint64(rc.id) {
+			case raftpb.ConfChangeRemoveNode: //如果是删除节点
+				if cc.NodeID == uint64(rc.id) { //如果这个节点是自己，提示自己已被移除
 					log.Println("I've been removed from the cluster! Shutting down.")
 					return nil, false
 				}
+				// 否则为网络层删除这个对等方节点
 				rc.transport.RemovePeer(types.ID(cc.NodeID))
 			}
 		}
 	}
 
+	// 创建信号
 	var applyDoneC chan struct{}
 
+	// 如果data有数据，则将data封装成commit通过commitC提交给上层处理
 	if len(data) > 0 {
 		applyDoneC = make(chan struct{}, 1)
 		select {
@@ -220,6 +236,7 @@ func (rc *raftNode) publishEntries(ents []raftpb.Entry) (<-chan struct{}, bool) 
 	}
 
 	// after commit, update appliedIndex
+	// 修改已应用的日志索引位置
 	rc.appliedIndex = ents[len(ents)-1].Index
 
 	return applyDoneC, true
@@ -384,7 +401,9 @@ func (rc *raftNode) stopHTTP() {
 	<-rc.httpdonec
 }
 
+// 通知上层模块加载新生成的快照数据，并使用新快照数据更新raftNode中的相应字段
 func (rc *raftNode) publishSnapshot(snapshotToSave raftpb.Snapshot) {
+	// 检测快照是不是为空
 	if raft.IsEmptySnap(snapshotToSave) {
 		return
 	}
@@ -392,11 +411,14 @@ func (rc *raftNode) publishSnapshot(snapshotToSave raftpb.Snapshot) {
 	log.Printf("publishing snapshot at index %d", rc.snapshotIndex)
 	defer log.Printf("finished publishing snapshot at index %d", rc.snapshotIndex)
 
+	// 如果快照数据小于等于已提交的日志索引，说明快照已过期，结束程序
 	if snapshotToSave.Metadata.Index <= rc.appliedIndex {
 		log.Fatalf("snapshot index [%d] should > progress.appliedIndex [%d]", snapshotToSave.Metadata.Index, rc.appliedIndex)
 	}
+	// 通知上层应用加载新生成的快照数据
 	rc.commitC <- nil // trigger kvstore to load snapshot
 
+	// 记录新快照元数据
 	rc.confState = snapshotToSave.Metadata.ConfState
 	rc.snapshotIndex = snapshotToSave.Metadata.Index
 	rc.appliedIndex = snapshotToSave.Metadata.Index
@@ -405,11 +427,12 @@ func (rc *raftNode) publishSnapshot(snapshotToSave raftpb.Snapshot) {
 var snapshotCatchUpEntriesN uint64 = 10000
 
 func (rc *raftNode) maybeTriggerSnapshot(applyDoneC <-chan struct{}) {
-	if rc.appliedIndex-rc.snapshotIndex <= rc.snapCount {
+	if rc.appliedIndex-rc.snapshotIndex <= rc.snapCount { //已应用位置 - 快照位置 <= 快照压缩间隔，则不进行日志压缩
 		return
 	}
 
 	// wait until all committed entries are applied (or server is closed)
+	// 等待日志被应用成功，防止出现中间状态
 	if applyDoneC != nil {
 		select {
 		case <-applyDoneC:
@@ -419,18 +442,22 @@ func (rc *raftNode) maybeTriggerSnapshot(applyDoneC <-chan struct{}) {
 	}
 
 	log.Printf("start snapshot [applied index: %d | last snapshot index: %d]", rc.appliedIndex, rc.snapshotIndex)
+	// 获取快照数据
 	data, err := rc.getSnapshot()
 	if err != nil {
 		log.Panic(err)
 	}
+	// 创建新快照
 	snap, err := rc.raftStorage.CreateSnapshot(rc.appliedIndex, &rc.confState, data)
 	if err != nil {
 		panic(err)
 	}
+	// 存储新快照
 	if err := rc.saveSnap(snap); err != nil {
 		panic(err)
 	}
 
+	// 压缩日志
 	compactIndex := uint64(1)
 	if rc.appliedIndex > snapshotCatchUpEntriesN {
 		compactIndex = rc.appliedIndex - snapshotCatchUpEntriesN
@@ -440,6 +467,7 @@ func (rc *raftNode) maybeTriggerSnapshot(applyDoneC <-chan struct{}) {
 	}
 
 	log.Printf("compacted log at index %d", compactIndex)
+	// 设置当前快照索引为已应用位置
 	rc.snapshotIndex = rc.appliedIndex
 }
 
