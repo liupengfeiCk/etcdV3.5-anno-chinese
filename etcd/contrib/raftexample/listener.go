@@ -23,6 +23,7 @@ import (
 // stoppableListener sets TCP keep-alive timeouts on accepted
 // connections and waits on stopc message
 type stoppableListener struct {
+	// 内嵌的TCPListener
 	*net.TCPListener
 	stopc <-chan struct{}
 }
@@ -38,22 +39,23 @@ func newStoppableListener(addr string, stopc <-chan struct{}) (*stoppableListene
 func (ln stoppableListener) Accept() (c net.Conn, err error) {
 	connc := make(chan *net.TCPConn, 1)
 	errc := make(chan error, 1)
+	// 启动单独的线程来接收新连接
 	go func() {
 		tc, err := ln.AcceptTCP()
 		if err != nil {
 			errc <- err
 			return
 		}
-		connc <- tc
+		connc <- tc //将接收到的新连接传入connc通道
 	}()
 	select {
-	case <-ln.stopc:
+	case <-ln.stopc: //从stopc中接收到信号，服务关闭
 		return nil, errors.New("server stopped")
-	case err := <-errc:
+	case err := <-errc: //从errc中接收到信号，返回错误
 		return nil, err
-	case tc := <-connc:
-		tc.SetKeepAlive(true)
-		tc.SetKeepAlivePeriod(3 * time.Minute)
+	case tc := <-connc: //从connc中接收到信号，conn接收成功
+		tc.SetKeepAlive(true)                  //设置keepAlive
+		tc.SetKeepAlivePeriod(3 * time.Minute) //设置keepAlive间隔
 		return tc, nil
 	}
 }

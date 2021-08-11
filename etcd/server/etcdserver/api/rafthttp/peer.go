@@ -65,25 +65,31 @@ type Peer interface {
 	// and has no promise that the message will be received by the remote.
 	// When it fails to send message out, it will report the status to underlying
 	// raft.
+	// 发送单个消息，该方法是非阻塞的，如果发送失败，则会将失败信息报告给底层的raft模块
 	send(m raftpb.Message)
 
 	// sendSnap sends the merged snapshot message to the remote peer. Its behavior
 	// is similar to send.
+	// 发送snap.Message 行为与send相似
 	sendSnap(m snap.Message)
 
 	// update updates the urls of remote peer.
+	// 更新对应节点暴露的url
 	update(urls types.URLs)
 
 	// attachOutgoingConn attaches the outgoing connection to the peer for
 	// stream usage. After the call, the ownership of the outgoing
 	// connection hands over to the peer. The peer will close the connection
 	// when it is no longer used.
+	// 将指定的连接与peer绑定，peer会将该连接作为Stream消息通道使用
 	attachOutgoingConn(conn *outgoingConn)
 	// activeSince returns the time that the connection with the
 	// peer becomes active.
+	// 返回对等方连接变为活跃的时间
 	activeSince() time.Time
 	// stop performs any necessary finalization and terminates the peer
 	// elegantly.
+	// 关闭当前peer实例，会关闭底层网络连接
 	stop()
 }
 
