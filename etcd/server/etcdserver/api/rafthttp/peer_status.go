@@ -67,6 +67,7 @@ func (s *peerStatus) deactivate(failure failureType, reason string) {
 		s.active = false
 		s.since = time.Time{}
 
+		// 记录到普罗米修斯
 		activePeers.WithLabelValues(s.local.String(), s.id.String()).Dec()
 		disconnectedPeers.WithLabelValues(s.local.String(), s.id.String()).Inc()
 		return

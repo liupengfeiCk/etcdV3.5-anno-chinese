@@ -111,21 +111,33 @@ type outgoingConn struct {
 }
 
 // streamWriter writes messages to the attached outgoingConn.
+// 向stream通道中写入消息
 type streamWriter struct {
 	lg *zap.Logger
 
+	// 本地id
 	localID types.ID
-	peerID  types.ID
+	// 对等方节点的id
+	peerID types.ID
 
+	// 对等方的状态
 	status *peerStatus
-	fs     *stats.FollowerStats
-	r      Raft
+	// follower状态
+	fs *stats.FollowerStats
+	// 下层raft实例
+	r Raft
 
-	mu      sync.Mutex // guard field working and closer
-	closer  io.Closer
+	// 资源锁
+	mu sync.Mutex // guard field working and closer
+	// 负责关闭底层的长连接
+	closer io.Closer
+	// 负责标识当前的streamWriter是否可用（底层是否关联了网络连接
 	working bool
 
-	msgc  chan raftpb.Message
+	// 从peer中接收消息，并将消息发送出去
+	msgc chan raftpb.Message
+	// 通过该通道获取与当前streamWriter关联的底层网络连接，outgoingConn其实是对底层网络连接的一层封装
+	// 其中记录了当前连接使用的协议版本，以及用于关闭连接的Flusher和Closer等信息
 	connc chan *outgoingConn
 	stopc chan struct{}
 	done  chan struct{}
@@ -155,15 +167,15 @@ func startStreamWriter(lg *zap.Logger, local, id types.ID, status *peerStatus, f
 func (cw *streamWriter) run() {
 	var (
 		msgc       chan raftpb.Message
-		heartbeatc <-chan time.Time
-		t          streamType
-		enc        encoder
-		flusher    http.Flusher
-		batched    int
+		heartbeatc <-chan time.Time // 该心跳用于防止长连接不使用而断开
+		t          streamType       // 用来记录消息的版本信息
+		enc        encoder          //序列化器，用于将消息序列化并写入到缓冲区
+		flusher    http.Flusher     // 负责刷新底层连接，将消息真正的发送出去
+		batched    int              //当前未flush的消息个数
 	)
-	tickc := time.NewTicker(ConnReadTimeout / 3)
+	tickc := time.NewTicker(ConnReadTimeout / 3) //发送心跳的定时器
 	defer tickc.Stop()
-	unflushed := 0
+	unflushed := 0 // 未flush的字节数
 
 	if cw.lg != nil {
 		cw.lg.Info(
@@ -175,21 +187,27 @@ func (cw *streamWriter) run() {
 
 	for {
 		select {
-		case <-heartbeatc:
+		case <-heartbeatc: //定时器到期，触发心跳
+			// 将心跳消息序列化并写入到缓冲区，这里的心跳是长连接的心跳
 			err := enc.encode(&linkHeartbeatMessage)
+			// 记录未刷新字节数
 			unflushed += linkHeartbeatMessage.Size()
 			if err == nil {
+				// 刷新并发送数据
 				flusher.Flush()
+				// 重制未刷新消息个数
 				batched = 0
+				// 记录已发送消息字节
 				sentBytes.WithLabelValues(cw.peerID.String()).Add(float64(unflushed))
+				// 重制未刷新消息字节
 				unflushed = 0
 				continue
 			}
-
+			// 发生错误，将peer状态转变未非活跃
 			cw.status.deactivate(failureType{source: t.String(), action: "heartbeat"}, err.Error())
-
+			// 记录到普罗米修斯
 			sentFailures.WithLabelValues(cw.peerID.String()).Inc()
-			cw.close()
+			cw.close() //关闭streamWriter，将导致底层连接关闭
 			if cw.lg != nil {
 				cw.lg.Warn(
 					"lost TCP streaming connection with remote peer",
@@ -198,14 +216,15 @@ func (cw *streamWriter) run() {
 					zap.String("remote-peer-id", cw.peerID.String()),
 				)
 			}
+			// 清空心跳通道和msgc
 			heartbeatc, msgc = nil, nil
 
-		case m := <-msgc:
-			err := enc.encode(&m)
+		case m := <-msgc: //msgc中接收到消息
+			err := enc.encode(&m) //将消息序列化并存入到缓冲区
 			if err == nil {
-				unflushed += m.Size()
+				unflushed += m.Size() //增加未刷新消息字节数
 
-				if len(msgc) == 0 || batched > streamBufSize/2 {
+				if len(msgc) == 0 || batched > streamBufSize/2 { // 如果消息通道为空或者超过了缓冲区的一半，则发送消息
 					flusher.Flush()
 					sentBytes.WithLabelValues(cw.peerID.String()).Add(float64(unflushed))
 					unflushed = 0
@@ -216,9 +235,9 @@ func (cw *streamWriter) run() {
 
 				continue
 			}
-
+			// 发送错误，将peer改为非活跃
 			cw.status.deactivate(failureType{source: t.String(), action: "write"}, err.Error())
-			cw.close()
+			cw.close() //关闭streamWriter，等待下一个conn
 			if cw.lg != nil {
 				cw.lg.Warn(
 					"lost TCP streaming connection with remote peer",
@@ -227,19 +246,25 @@ func (cw *streamWriter) run() {
 					zap.String("remote-peer-id", cw.peerID.String()),
 				)
 			}
+			// 清空心跳和msgc
 			heartbeatc, msgc = nil, nil
+			// 向底层报告当前节点无法联通
 			cw.r.ReportUnreachable(m.To)
+			// 记录统计数据到普罗米修斯
 			sentFailures.WithLabelValues(cw.peerID.String()).Inc()
 
-		case conn := <-cw.connc:
+		// 当其他节点主动与当前节点创建stream通道时，会先通过StreamHander的处理，
+		// StreamHander会通过attach()方法将连接写入对应的peer.writer.connc通道，
+		// 这里会将connc通道中获取连接，并开始发送消息
+		case conn := <-cw.connc: //获取连接
 			cw.mu.Lock()
-			closed := cw.closeUnlocked()
-			t = conn.t
+			closed := cw.closeUnlocked() //如果在处理新的连接的时候，上一个连接还未关闭，则关闭上一个连接，并且在msgc中还有消息的话将向底层raft发送通知
+			t = conn.t                   //获取该连接底层发送的消息版本，并创建相应的encoder实例
 			switch conn.t {
-			case streamTypeMsgAppV2:
+			case streamTypeMsgAppV2: //如果是V2版本，则创建V2版本的序列化器
 				enc = newMsgAppV2Encoder(conn.Writer, cw.fs)
-			case streamTypeMessage:
-				enc = &messageEncoder{w: conn.Writer}
+			case streamTypeMessage: //创建序列化器
+				enc = &messageEncoder{w: conn.Writer} // 将conn的Writer封装进序列化器
 			default:
 				if cw.lg != nil {
 					cw.lg.Panic("unhandled stream type", zap.String("stream-type", t.String()))
@@ -253,11 +278,11 @@ func (cw *streamWriter) run() {
 					zap.String("stream-type", t.String()),
 				)
 			}
-			flusher = conn.Flusher
-			unflushed = 0
-			cw.status.activate()
-			cw.closer = conn.Closer
-			cw.working = true
+			flusher = conn.Flusher  //记录底层连接对应的flusher
+			unflushed = 0           //重制未flush的字节数
+			cw.status.activate()    //将peerStatus.active设置为true，表示peer在活动中
+			cw.closer = conn.Closer //将streamWriter的closer设置为连接的closer
+			cw.working = true       //标识当前streamWriter正在运行
 			cw.mu.Unlock()
 
 			if closed {
@@ -278,9 +303,10 @@ func (cw *streamWriter) run() {
 					zap.String("remote-peer-id", cw.peerID.String()),
 				)
 			}
+			// 设置心跳与msgc
 			heartbeatc, msgc = tickc.C, cw.msgc
 
-		case <-cw.stopc:
+		case <-cw.stopc: //收到停止消息，关闭streamWriter
 			if cw.close() {
 				if cw.lg != nil {
 					cw.lg.Warn(
@@ -297,8 +323,8 @@ func (cw *streamWriter) run() {
 					zap.String("remote-peer-id", cw.peerID.String()),
 				)
 			}
-			close(cw.done)
-			return
+			close(cw.done) //发送streamWriter的关闭信号
+			return         //退出这个线程，也就是说就算有下一个conn也不会再接收了
 		}
 	}
 }
