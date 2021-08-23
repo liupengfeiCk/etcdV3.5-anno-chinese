@@ -58,7 +58,7 @@ func (s *peerStatus) activate() {
 	}
 }
 
-func (s *peerStatus) deactivate(failure failureType, reason string) {
+func (s *peerStatus) deactivate(failure failureType, reason string) { //将对端的状态设置为false，表示非活跃
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	msg := fmt.Sprintf("failed to %s %s on %s (%s)", failure.action, s.id, failure.source, reason)

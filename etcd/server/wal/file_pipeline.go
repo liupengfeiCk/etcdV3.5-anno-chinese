@@ -29,14 +29,19 @@ type filePipeline struct {
 	lg *zap.Logger
 
 	// dir to put files
+	// 存放临时文件的目录
 	dir string
 	// size of files to make, in bytes
+	// 创建临时文件的预分配空间的大小，默认为64MB（由wal.SegmentSizeBytes，该值也是wal日志文件的大小）
 	size int64
 	// count number of files generated
+	// 当前实例所创建的临时文件数
 	count int
 
+	// 新建的临时文件句柄会通过filec通道发送给wal实例使用
 	filec chan *fileutil.LockedFile
 	errc  chan error
+	// 当filePipeline.Close调用时，关闭这个chan，从而通知filePipeline在关闭之前删除最后一次创建的临时文件
 	donec chan struct{}
 }
 
@@ -73,7 +78,9 @@ func (fp *filePipeline) Close() error {
 
 func (fp *filePipeline) alloc() (f *fileutil.LockedFile, err error) {
 	// count % 2 so this file isn't the same as the one last published
+	// 用计数%2来保证每一次创建的文件都与上一次不同（一般情况下一次只有一个临时文件）
 	fpath := filepath.Join(fp.dir, fmt.Sprintf("%d.tmp", fp.count%2))
+	// 创建临时文件，文件的模式为：只写 文件的权限为：600 即管理员可读可写
 	if f, err = fileutil.LockFile(fpath, os.O_CREATE|os.O_WRONLY, fileutil.PrivateFileMode); err != nil {
 		return nil, err
 	}
@@ -89,14 +96,14 @@ func (fp *filePipeline) alloc() (f *fileutil.LockedFile, err error) {
 func (fp *filePipeline) run() {
 	defer close(fp.errc)
 	for {
-		f, err := fp.alloc()
+		f, err := fp.alloc() // 调用该方法创建临时文件
 		if err != nil {
 			fp.errc <- err
 			return
 		}
 		select {
-		case fp.filec <- f:
-		case <-fp.donec:
+		case fp.filec <- f: //将临时文件句柄发送进filec
+		case <-fp.donec: // 如果fp被关闭，则删除当前的临时文件
 			os.Remove(f.Name())
 			f.Close()
 			return

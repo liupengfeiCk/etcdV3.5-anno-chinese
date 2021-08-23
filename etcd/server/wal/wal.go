@@ -36,14 +36,20 @@ import (
 )
 
 const (
+	// 元数据类型。在每个wal日志的开头都会记录一个元数据类型的日志
 	metadataType int64 = iota + 1
+	// entry类型
 	entryType
+	// state类型， 保存了当前集群中的状态信息（即HardState），在每次批量写入entryType类型的日志之前，都会先写入一条stateType的日志
 	stateType
+	// 该类型的日志记录主要用于数据校验
 	crcType
+	// 该类型的日志中记录了快照数据的相关信息（即walpb.Snapshot，其中不包含完整的快照数据）
 	snapshotType
 
 	// warnSyncDuration is the amount of time allotted to an fsync before
 	// logging a warning
+	// 一个用于记录的量，超过这个量（1s）将发出警告
 	warnSyncDuration = time.Second
 )
 
@@ -73,26 +79,40 @@ var (
 type WAL struct {
 	lg *zap.Logger
 
+	// 存放wal日志文件的路径
 	dir string // the living directory of the underlay files
 
 	// dirFile is a fd for the wal directory for syncing on Rename
+	// 根据dir路径创建的文件实例
 	dirFile *os.File
 
-	metadata []byte           // metadata recorded at the head of each WAL
-	state    raftpb.HardState // hardstate recorded at the head of WAL
+	// 在每个wal日志文件的头部都会写入metadata数据
+	metadata []byte // metadata recorded at the head of each WAL
+	// wal日志每次都是批量追加的，在每次批量追加entry之后，会再追加一条stateType类型的日志
+	// 内容为当前的term、当前节点的投票结果和已提交日志的位置（实际上就是HardState）
+	state raftpb.HardState // hardstate recorded at the head of WAL
 
-	start     walpb.Snapshot // snapshot to start reading
-	decoder   *decoder       // decoder to decode records
-	readClose func() error   // closer for decode reader
+	// 每次读取wal日志时并不会从头开始读，而是通过start所指定的位置
+	start walpb.Snapshot // snapshot to start reading
+	// 负责在读取wal日志时将日志记录反序列化为record
+	decoder *decoder // decoder to decode records
+	// 负责关闭这个docoder
+	readClose func() error // closer for decode reader
 
+	// 如果设置了这个，则不会调用fsync强制刷盘
 	unsafeNoSync bool // if set, do not fsync
 
-	mu      sync.Mutex
-	enti    uint64   // index of the last entry saved to the wal
+	// 读写wal日志时需要加锁
+	mu sync.Mutex
+	// wal中最后一条记录的索引值
+	enti uint64 // index of the last entry saved to the wal
+	// 负责在写入wal日志时将record序列化为二进制数据
 	encoder *encoder // encoder to encode records
 
+	// 当前wal日志所管理的所有wal日志文件的句柄
 	locks []*fileutil.LockedFile // the locked files the WAL holds (the name is increasing)
-	fp    *filePipeline
+	// 负责创建新的临时文件
+	fp *filePipeline
 }
 
 // Create creates a WAL ready for appending records. The given metadata is

@@ -25,9 +25,13 @@ var _ = math.Inf
 // proto package needs to be updated.
 const _ = proto.ProtoPackageIsVersion3 // please upgrade the proto package
 
+// 一条日志记录
 type Record struct {
-	Type                 int64    `protobuf:"varint,1,opt,name=type" json:"type"`
-	Crc                  uint32   `protobuf:"varint,2,opt,name=crc" json:"crc"`
+	// 表示该Record实例的类型
+	Type int64 `protobuf:"varint,1,opt,name=type" json:"type"`
+	// 记录该Record实例的校验码
+	Crc uint32 `protobuf:"varint,2,opt,name=crc" json:"crc"`
+	// 记录真正的日志数据，根据日志类型的不同，data中保存的数据也不同
 	Data                 []byte   `protobuf:"bytes,3,opt,name=data" json:"data,omitempty"`
 	XXX_NoUnkeyedLiteral struct{} `json:"-"`
 	XXX_unrecognized     []byte   `json:"-"`
@@ -69,9 +73,12 @@ var xxx_messageInfo_Record proto.InternalMessageInfo
 
 // Keep in sync with raftpb.SnapshotMetadata.
 type Snapshot struct {
+	// 记录了对应快照数据所涵盖的最后一条entry的索引
 	Index uint64 `protobuf:"varint,1,opt,name=index" json:"index"`
-	Term  uint64 `protobuf:"varint,2,opt,name=term" json:"term"`
+	// 记录了这个entry所对应的term
+	Term uint64 `protobuf:"varint,2,opt,name=term" json:"term"`
 	// Field populated since >=etcd-3.5.0.
+	// 集群的配置信息
 	ConfState            *raftpb.ConfState `protobuf:"bytes,3,opt,name=conf_state,json=confState" json:"conf_state,omitempty"`
 	XXX_NoUnkeyedLiteral struct{}          `json:"-"`
 	XXX_unrecognized     []byte            `json:"-"`

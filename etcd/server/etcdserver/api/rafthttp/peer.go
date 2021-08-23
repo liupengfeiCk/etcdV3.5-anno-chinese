@@ -246,7 +246,7 @@ func startPeer(t *Transport, urls types.URLs, peerID types.ID, fs *stats.Followe
 		status: status,
 		recvc:  p.recvc,
 		propc:  p.propc,
-		rl:     rate.NewLimiter(t.DialRetryFrequency, 1),
+		rl:     rate.NewLimiter(t.DialRetryFrequency, 1), //每隔一段时间加入一个令牌，且令牌桶大小为1
 	}
 	// 创建msgAppReader，主要负责从stream中读取消息
 	p.msgAppReader = &streamReader{
@@ -280,7 +280,7 @@ func (p *peer) send(m raftpb.Message) { //发送消息的方法
 	writec, name := p.pick(m)
 	select {
 	case writec <- m: //写入消息到通道中
-	default: //没有获取到writec，可能发生了阻塞
+	default: //消息已满
 		p.r.ReportUnreachable(m.To) //向底层报告指定节点无法联通
 		if isMsgSnap(m) {           //如果消息是快照消息
 			p.r.ReportSnapshot(m.To, raft.SnapshotFailure) //通知底层快照消息发送失败
@@ -323,19 +323,19 @@ func (p *peer) update(urls types.URLs) {
 	p.picker.update(urls)
 }
 
-func (p *peer) attachOutgoingConn(conn *outgoingConn) {
+func (p *peer) attachOutgoingConn(conn *outgoingConn) { //将底层网络连接传递到streamWriter中
 	var ok bool
 	switch conn.t {
-	case streamTypeMsgAppV2:
+	case streamTypeMsgAppV2: //如果连接是v2版本，则放入到v2版本的stream中
 		ok = p.msgAppV2Writer.attach(conn)
-	case streamTypeMessage:
+	case streamTypeMessage: //将连接放入到streamWriter中
 		ok = p.writer.attach(conn)
 	default:
 		if p.lg != nil {
 			p.lg.Panic("unknown stream type", zap.String("type", conn.t.String()))
 		}
 	}
-	if !ok {
+	if !ok { //如果发生异常，则关闭连接
 		conn.Close()
 	}
 }

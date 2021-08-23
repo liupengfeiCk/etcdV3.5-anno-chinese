@@ -364,7 +364,7 @@ func (cw *streamWriter) closeUnlocked() bool {
 
 func (cw *streamWriter) attach(conn *outgoingConn) bool {
 	select {
-	case cw.connc <- conn:
+	case cw.connc <- conn: //将conn实例写入到connc中
 		return true
 	case <-cw.done:
 		return false
@@ -381,24 +381,41 @@ func (cw *streamWriter) stop() {
 type streamReader struct {
 	lg *zap.Logger
 
+	// 对应节点的id
 	peerID types.ID
-	typ    streamType
+	// 关联的底层连接使用的协议版本
+	typ streamType
 
-	tr     *Transport
+	// 关联的rafthttp.Transport实例
+	tr *Transport
+	// 用于获取对应节点的可用url
 	picker *urlPicker
-	status *peerStatus
-	recvc  chan<- raftpb.Message
-	propc  chan<- raftpb.Message
 
+	//对应节点的状态
+	status *peerStatus
+	// 接收从对端节点发来的除了MsgProp消息之外的消息，然后交由peer.start方法启动的后台线程去读取并交由底层raft实例去处理
+	recvc chan<- raftpb.Message
+	// 接收从对端节点发来的MsgProp消息，然后交由peer.start方法启动的后台线程去读取并交由底层raft实例去处理
+	propc chan<- raftpb.Message
+
+	// 重新拨号尝试的频率
+	// 这是一个限流器，初始化方式为每隔一段时间往里面加入一定量的令牌
 	rl *rate.Limiter // alters the frequency of dial retrial attempts
 
+	//错误通道
 	errorc chan<- error
 
-	mu     sync.Mutex
+	// paused的资源锁
+	mu sync.Mutex
+	// 是否暂停读取消息
 	paused bool
+
+	//reader的关闭操作
 	closer io.Closer
 
-	ctx    context.Context
+	// 用于通知的context
+	ctx context.Context
+	// 关闭ctx的操作
 	cancel context.CancelFunc
 	done   chan struct{}
 }
@@ -415,7 +432,7 @@ func (cr *streamReader) start() {
 }
 
 func (cr *streamReader) run() {
-	t := cr.typ
+	t := cr.typ //获取使用的消息版本
 
 	if cr.lg != nil {
 		cr.lg.Info(
@@ -427,12 +444,14 @@ func (cr *streamReader) run() {
 	}
 
 	for {
+		// 向对端节点发送一个get请求，然后获取并返回相应的readClose
 		rc, err := cr.dial(t)
-		if err != nil {
-			if err != errUnsupportedStreamType {
+		if err != nil { //发生异常
+			if err != errUnsupportedStreamType { //如果不是t的类型为未知，则表示对端无法联通，将对端改为非活跃
 				cr.status.deactivate(failureType{source: t.String(), action: "dial"}, err.Error())
 			}
 		} else {
+			// 将对端设置为活跃
 			cr.status.activate()
 			if cr.lg != nil {
 				cr.lg.Info(
@@ -442,6 +461,7 @@ func (cr *streamReader) run() {
 					zap.String("remote-peer-id", cr.peerID.String()),
 				)
 			}
+			// 开始读取对端返回的消息，并将读到的消息写入recvc通道中
 			err = cr.decodeLoop(rc, t)
 			if cr.lg != nil {
 				cr.lg.Warn(
@@ -454,16 +474,19 @@ func (cr *streamReader) run() {
 			}
 			switch {
 			// all data is read out
-			case err == io.EOF:
+			case err == io.EOF: //如果err为EOF表示所有的消息已经被读取
 			// connection is closed by the remote
-			case transport.IsClosedConnError(err):
-			default:
+			case transport.IsClosedConnError(err): //连接被关闭
+			default: //不是这些错误则将对端状态设置为非活跃
 				cr.status.deactivate(failureType{source: t.String(), action: "read"}, err.Error())
 			}
 		}
 		// Wait for a while before new dial attempt
+		// 在重新拨号，发起下一次请求前等待一个可用的令牌
+		// 这里在之前的设计中是直接等待一个间隔时间，这里转换为了等待一个间隔一段时间发放的一个令牌，避免了无意义的等待
+		// 因为令牌桶的大小为1，所以也就相当于每隔一段时间执行一次
 		err = cr.rl.Wait(cr.ctx)
-		if cr.ctx.Err() != nil {
+		if cr.ctx.Err() != nil { //如果ctx的错误不为空，则表示这个streamReader的ctx已被关闭，关闭当前streamReader
 			if cr.lg != nil {
 				cr.lg.Info(
 					"stopped stream reader with remote peer",
@@ -475,7 +498,7 @@ func (cr *streamReader) run() {
 			close(cr.done)
 			return
 		}
-		if err != nil {
+		if err != nil { //等待报错，等待令牌超出了限制，具体什么限制不清除，因为等待不可能一直卡住，所以会放开并报错
 			if cr.lg != nil {
 				cr.lg.Warn(
 					"rate limit on stream reader with remote peer",
@@ -489,9 +512,12 @@ func (cr *streamReader) run() {
 	}
 }
 
+// 将底层网络连接中的消息读取并反序列化为消息，将消息写入到recvc或propc通道中，并通过peer启动的后台线程将其交给底层raft模块处理
 func (cr *streamReader) decodeLoop(rc io.ReadCloser, t streamType) error {
+	// 解码器
 	var dec decoder
-	cr.mu.Lock()
+	cr.mu.Lock() //主要用于锁ctx
+	// 根据消息类型创建解码器
 	switch t {
 	case streamTypeMsgAppV2:
 		dec = newMsgAppV2Decoder(rc, cr.tr.ID, cr.peerID)
@@ -502,13 +528,14 @@ func (cr *streamReader) decodeLoop(rc io.ReadCloser, t streamType) error {
 			cr.lg.Panic("unknown stream type", zap.String("type", t.String()))
 		}
 	}
+	// 检测streamReader是否关闭了
 	select {
-	case <-cr.ctx.Done():
+	case <-cr.ctx.Done(): //如果关闭了，则关闭readCloser（实际上就是http.body）
 		cr.mu.Unlock()
 		if err := rc.Close(); err != nil {
 			return err
 		}
-		return io.EOF
+		return io.EOF //返回消息已读完
 	default:
 		cr.closer = rc
 	}
@@ -516,7 +543,7 @@ func (cr *streamReader) decodeLoop(rc io.ReadCloser, t streamType) error {
 
 	// gofail: labelRaftDropHeartbeat:
 	for {
-		m, err := dec.decode()
+		m, err := dec.decode() //从body中读取消息并反序列化
 		if err != nil {
 			cr.mu.Lock()
 			cr.close()
@@ -526,16 +553,19 @@ func (cr *streamReader) decodeLoop(rc io.ReadCloser, t streamType) error {
 
 		// gofail-go: var raftDropHeartbeat struct{}
 		// continue labelRaftDropHeartbeat
+		// 记录监控数据（总消息大小）到普罗米修斯
 		receivedBytes.WithLabelValues(types.ID(m.From).String()).Add(float64(m.Size()))
 
+		// 获取是否可发送的状态
 		cr.mu.Lock()
 		paused := cr.paused
 		cr.mu.Unlock()
-
+		// 如果暂停发送，则直接进入下一个循环，直接丢弃消息
 		if paused {
 			continue
 		}
 
+		// 检查该消息是否为链接层的心跳消息，如果是则忽略
 		if isLinkHeartbeatMessage(&m) {
 			// raft is not interested in link layer
 			// heartbeat message, so we should ignore
@@ -543,14 +573,16 @@ func (cr *streamReader) decodeLoop(rc io.ReadCloser, t streamType) error {
 			continue
 		}
 
+		// 设置消息通道，如果是msgProp，则消息通道为propc
 		recvc := cr.recvc
 		if m.Type == raftpb.MsgProp {
 			recvc = cr.propc
 		}
 
+		// 向通道中发送消息
 		select {
 		case recvc <- m:
-		default:
+		default: //否则，丢弃该消息，并记录日志recvc通道已经满了
 			if cr.status.isActive() {
 				if cr.lg != nil {
 					cr.lg.Warn(
@@ -587,9 +619,10 @@ func (cr *streamReader) stop() {
 	<-cr.done
 }
 
-func (cr *streamReader) dial(t streamType) (io.ReadCloser, error) {
-	u := cr.picker.pick()
+func (cr *streamReader) dial(t streamType) (io.ReadCloser, error) { //用于向对端建立连接
+	u := cr.picker.pick() //获取对端暴露的一个可用的url
 	uu := u
+	// 根据协议版本和自己的节点id创建最终url
 	uu.Path = path.Join(t.endpoint(cr.lg), cr.tr.ID.String())
 
 	if cr.lg != nil {
@@ -600,6 +633,7 @@ func (cr *streamReader) dial(t streamType) (io.ReadCloser, error) {
 			zap.String("address", uu.String()),
 		)
 	}
+	// 创建一个get请求
 	req, err := http.NewRequest("GET", uu.String(), nil)
 	if err != nil {
 		cr.picker.unreachable(u)
@@ -611,25 +645,29 @@ func (cr *streamReader) dial(t streamType) (io.ReadCloser, error) {
 	req.Header.Set("X-Etcd-Cluster-ID", cr.tr.ClusterID.String())
 	req.Header.Set("X-Raft-To", cr.peerID.String())
 
+	// 将当前节点暴露的url设置进请求，让对端节点接收
 	setPeerURLsHeader(req, cr.tr.URLs)
 
+	//cr.ctx用于通知当前请求是否继续发送，在cr的ctx关闭后，发送请求取消
 	req = req.WithContext(cr.ctx)
 
 	cr.mu.Lock()
 	select {
-	case <-cr.ctx.Done():
+	case <-cr.ctx.Done(): //查看ctx是否关闭
 		cr.mu.Unlock()
 		return nil, fmt.Errorf("stream reader is stopped")
 	default:
 	}
 	cr.mu.Unlock()
 
+	//发送请求
 	resp, err := cr.tr.streamRt.RoundTrip(req)
-	if err != nil {
+	if err != nil { //如果err不为空，标记当前url不可用
 		cr.picker.unreachable(u)
 		return nil, err
 	}
 
+	// 检查header信息是否合法
 	rv := serverVersion(resp.Header)
 	lv := semver.Must(semver.NewVersion(version.Version))
 	if compareMajorMinorVersion(rv, lv) == -1 && !checkStreamSupport(rv, t) {
@@ -638,22 +676,22 @@ func (cr *streamReader) dial(t streamType) (io.ReadCloser, error) {
 		return nil, errUnsupportedStreamType
 	}
 
-	switch resp.StatusCode {
-	case http.StatusGone:
+	switch resp.StatusCode { //根据响应码进行处理
+	case http.StatusGone: //410 表示节点被删除
 		httputil.GracefulClose(resp)
 		cr.picker.unreachable(u)
 		reportCriticalError(errMemberRemoved, cr.errorc)
 		return nil, errMemberRemoved
 
-	case http.StatusOK:
+	case http.StatusOK: //200 响应成功，返回body
 		return resp.Body, nil
 
-	case http.StatusNotFound:
+	case http.StatusNotFound: //404
 		httputil.GracefulClose(resp)
 		cr.picker.unreachable(u)
 		return nil, fmt.Errorf("peer %s failed to find local node %s", cr.peerID, cr.tr.ID)
 
-	case http.StatusPreconditionFailed:
+	case http.StatusPreconditionFailed: //412
 		b, err := ioutil.ReadAll(resp.Body)
 		if err != nil {
 			cr.picker.unreachable(u)
@@ -663,7 +701,7 @@ func (cr *streamReader) dial(t streamType) (io.ReadCloser, error) {
 		cr.picker.unreachable(u)
 
 		switch strings.TrimSuffix(string(b), "\n") {
-		case errIncompatibleVersion.Error():
+		case errIncompatibleVersion.Error(): //版本不兼容
 			if cr.lg != nil {
 				cr.lg.Warn(
 					"request sent was ignored by remote peer due to server version incompatibility",
@@ -674,7 +712,7 @@ func (cr *streamReader) dial(t streamType) (io.ReadCloser, error) {
 			}
 			return nil, errIncompatibleVersion
 
-		case errClusterIDMismatch.Error():
+		case errClusterIDMismatch.Error(): //集群id不匹配
 			if cr.lg != nil {
 				cr.lg.Warn(
 					"request sent was ignored by remote peer due to cluster ID mismatch",

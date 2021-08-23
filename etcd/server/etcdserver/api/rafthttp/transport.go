@@ -247,7 +247,7 @@ func (t *Transport) Send(msgs []raftpb.Message) {
 		}
 
 		if rok { //如果获取到了remote但没有获取到peer
-			g.send(m) //之间发送消息
+			g.send(m) //直接发送消息
 			continue
 		}
 

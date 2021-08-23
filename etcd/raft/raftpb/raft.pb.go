@@ -478,7 +478,8 @@ func (m *HardState) XXX_DiscardUnknown() {
 
 var xxx_messageInfo_HardState proto.InternalMessageInfo
 
-type ConfState struct { //封装集群的配置信息，包括选民，学习者等
+//封装集群的配置信息，包括选民，学习者等
+type ConfState struct {
 	// The voters in the incoming config. (If the configuration is not joint,
 	// then the outgoing config is empty).
 	Voters []uint64 `protobuf:"varint,1,rep,name=voters" json:"voters,omitempty"`

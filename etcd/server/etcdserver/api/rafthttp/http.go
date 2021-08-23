@@ -53,8 +53,10 @@ var (
 	RaftStreamPrefix   = path.Join(RaftPrefix, "stream")
 	RaftSnapshotPrefix = path.Join(RaftPrefix, "snapshot")
 
+	// 错误，不兼容的版本
 	errIncompatibleVersion = errors.New("incompatible version")
-	errClusterIDMismatch   = errors.New("cluster ID mismatch")
+	// 错误，集群id不匹配
+	errClusterIDMismatch = errors.New("cluster ID mismatch")
 )
 
 type peerGetter interface {
@@ -65,12 +67,16 @@ type writerToResponse interface {
 	WriteTo(w http.ResponseWriter)
 }
 
+// 对pipeline所传递的消息进行处理
 type pipelineHandler struct {
 	lg      *zap.Logger
 	localID types.ID
-	tr      Transporter
-	r       Raft
-	cid     types.ID
+	// 当前pipeline实例关联的transporter
+	tr Transporter
+	// 底层的raft实例
+	r Raft
+	// 当前集群的id
+	cid types.ID
 }
 
 // newPipelineHandler returns a handler for handling raft messages
@@ -92,26 +98,32 @@ func newPipelineHandler(t *Transport, r Raft, cid types.ID) http.Handler {
 	return h
 }
 
+//接收对端的请求并处理
 func (h *pipelineHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// 检查是不是post
 	if r.Method != "POST" {
 		w.Header().Set("Allow", "POST")
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
+	// 为resp的header设置集群id
 	w.Header().Set("X-Etcd-Cluster-ID", h.cid.String())
 
+	// 判断版本是否兼容，且集群id是否相等
 	if err := checkClusterCompatibilityFromHeader(h.lg, h.localID, r.Header, h.cid); err != nil {
 		http.Error(w, err.Error(), http.StatusPreconditionFailed)
 		return
 	}
 
+	// 将req中携带的对端url记录进本地的transporter
 	addRemoteFromRequest(h.tr, r)
 
 	// Limit the data size that could be read from the request body, which ensures that read from
 	// connection will not time out accidentally due to possible blocking in underlying implementation.
+	// 限制每次从body中读取的数据大小，默认限制为64kb，这是为了防止读取超时
 	limitedr := pioutil.NewLimitedBufferReader(r.Body, connReadLimitByte)
-	b, err := ioutil.ReadAll(limitedr)
+	b, err := ioutil.ReadAll(limitedr) //读取body中的全部内容
 	if err != nil {
 		h.lg.Warn(
 			"failed to read Raft message",
@@ -124,6 +136,7 @@ func (h *pipelineHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var m raftpb.Message
+	// 反序列化得到消息
 	if err := m.Unmarshal(b); err != nil {
 		h.lg.Warn(
 			"failed to unmarshal Raft message",
@@ -135,8 +148,10 @@ func (h *pipelineHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 记录收到的数据大小到普罗米修斯
 	receivedBytes.WithLabelValues(types.ID(m.From).String()).Add(float64(len(b)))
 
+	// 将消息传递到底层raft处理
 	if err := h.r.Process(context.TODO(), m); err != nil {
 		switch v := err.(type) {
 		case writerToResponse:
@@ -157,17 +172,24 @@ func (h *pipelineHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Write StatusNoContent header after the message has been processed by
 	// raft, which facilitates the client to report MsgSnap status.
+	// 向对端节点返回状态码
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// 用于接收对端发来的快照数据
 type snapshotHandler struct {
-	lg          *zap.Logger
-	tr          Transporter
-	r           Raft
+	lg *zap.Logger
+	// 关联的transporter实例
+	tr Transporter
+	// 底层raft实例
+	r Raft
+	// 负责将快照数据保存到本地文件中
 	snapshotter *snap.Snapshotter
 
+	// 本地id
 	localID types.ID
-	cid     types.ID
+	// 集群id
+	cid types.ID
 }
 
 func newSnapshotHandler(t *Transport, r Raft, snapshotter *snap.Snapshotter, cid types.ID) http.Handler {
@@ -196,6 +218,7 @@ const unknownSnapshotSender = "UNKNOWN_SNAPSHOT_SENDER"
 // 1. snapshot messages sent through other TCP connections could still be
 // received and processed.
 // 2. this case should happen rarely, so no further optimization is done.
+// 接收来着对端的快照请求
 func (h *snapshotHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
@@ -208,17 +231,22 @@ func (h *snapshotHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("X-Etcd-Cluster-ID", h.cid.String())
 
+	// 检查版本是否兼容和集群id是否一致
 	if err := checkClusterCompatibilityFromHeader(h.lg, h.localID, r.Header, h.cid); err != nil {
 		http.Error(w, err.Error(), http.StatusPreconditionFailed)
 		snapshotReceiveFailures.WithLabelValues(unknownSnapshotSender).Inc()
 		return
 	}
 
+	// 添加对端的url到本地的tr
 	addRemoteFromRequest(h.tr, r)
 
+	// 解码器
 	dec := &messageDecoder{r: r.Body}
 	// let snapshots be very large since they can exceed 512MB for large installations
+	// 限制每次的读取大小，限制为1TB
 	m, err := dec.decodeLimit(snapshotLimitByte)
+	// 获取对端地址
 	from := types.ID(m.From).String()
 	if err != nil {
 		msg := fmt.Sprintf("failed to decode raft message (%v)", err)
@@ -235,9 +263,10 @@ func (h *snapshotHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	msgSize := m.Size()
+	// 记录消息大小到普罗米修斯
 	receivedBytes.WithLabelValues(from).Add(float64(msgSize))
 
-	if m.Type != raftpb.MsgSnap {
+	if m.Type != raftpb.MsgSnap { //如果消息类型不是快照，则不处理
 		h.lg.Warn(
 			"unexpected Raft message type",
 			zap.String("local-member-id", h.localID.String()),
@@ -249,6 +278,7 @@ func (h *snapshotHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 记录正在接收的快照数
 	snapshotReceiveInflights.WithLabelValues(from).Inc()
 	defer func() {
 		snapshotReceiveInflights.WithLabelValues(from).Dec()
@@ -265,6 +295,7 @@ func (h *snapshotHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// save incoming database snapshot.
 
+	// 使用snapshotter将快照数据保存到本地中
 	n, err := h.snapshotter.SaveDBFrom(r.Body, m.Snapshot.Metadata.Index)
 	if err != nil {
 		msg := fmt.Sprintf("failed to save KV snapshot (%v)", err)
@@ -293,6 +324,7 @@ func (h *snapshotHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		zap.String("download-took", downloadTook.String()),
 	)
 
+	// 将快照消息发往底层raft实例处理
 	if err := h.r.Process(context.TODO(), m); err != nil {
 		switch v := err.(type) {
 		// Process may return writerToResponse error when doing some
@@ -315,19 +347,26 @@ func (h *snapshotHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Write StatusNoContent header after the message has been processed by
 	// raft, which facilitates the client to report MsgSnap status.
+	// 返回状态码204
 	w.WriteHeader(http.StatusNoContent)
 
 	snapshotReceive.WithLabelValues(from).Inc()
 	snapshotReceiveSeconds.WithLabelValues(from).Observe(time.Since(start).Seconds())
 }
 
+// 在接收到对端的网络连接后，将连接与streamWirter联系起来，这样就可以通过streamWirter向对端发送消息
 type streamHandler struct {
-	lg         *zap.Logger
-	tr         *Transport
+	lg *zap.Logger
+	// 关联底层transport
+	tr *Transport
+	// 该实例用于根据指定的节点id返回对应的peer
 	peerGetter peerGetter
-	r          Raft
-	id         types.ID
-	cid        types.ID
+	// 底层raft实例
+	r Raft
+	// 当前节点的id
+	id types.ID
+	// 当前集群的id
+	cid types.ID
 }
 
 func newStreamHandler(t *Transport, pg peerGetter, r Raft, id, cid types.ID) http.Handler {
@@ -345,6 +384,7 @@ func newStreamHandler(t *Transport, pg peerGetter, r Raft, id, cid types.ID) htt
 	return h
 }
 
+// 处理对端的get请求
 func (h *streamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" {
 		w.Header().Set("Allow", "GET")
@@ -352,16 +392,18 @@ func (h *streamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 设置版本号和集群id
 	w.Header().Set("X-Server-Version", version.Version)
 	w.Header().Set("X-Etcd-Cluster-ID", h.cid.String())
 
+	// 检查版本兼容性和集群id是否一致
 	if err := checkClusterCompatibilityFromHeader(h.lg, h.tr.ID, r.Header, h.cid); err != nil {
 		http.Error(w, err.Error(), http.StatusPreconditionFailed)
 		return
 	}
 
 	var t streamType
-	switch path.Dir(r.URL.Path) {
+	switch path.Dir(r.URL.Path) { //确定使用的协议版本
 	case streamTypeMsgAppV2.endpoint(h.lg):
 		t = streamTypeMsgAppV2
 	case streamTypeMessage.endpoint(h.lg):
@@ -377,6 +419,7 @@ func (h *streamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 获取对端节点的id
 	fromStr := path.Base(r.URL.Path)
 	from, err := types.IDFromString(fromStr)
 	if err != nil {
@@ -390,7 +433,7 @@ func (h *streamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid from", http.StatusNotFound)
 		return
 	}
-	if h.r.IsIDRemoved(uint64(from)) {
+	if h.r.IsIDRemoved(uint64(from)) { //判断该对端是否已经被删除
 		h.lg.Warn(
 			"rejected stream from remote peer because it was removed",
 			zap.String("local-member-id", h.tr.ID.String()),
@@ -400,13 +443,14 @@ func (h *streamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "removed member", http.StatusGone)
 		return
 	}
-	p := h.peerGetter.Get(from)
+	p := h.peerGetter.Get(from) //通过对端id获取peer
 	if p == nil {
 		// This may happen in following cases:
 		// 1. user starts a remote peer that belongs to a different cluster
 		// with the same cluster ID.
 		// 2. local etcd falls behind of the cluster, and cannot recognize
 		// the members that joined after its current progress.
+		// 无论peer是否存在，都将对端的url加入到tr中
 		if urls := r.Header.Get("X-PeerURLs"); urls != "" {
 			h.tr.AddRemote(from, strings.Split(urls, ","))
 		}
@@ -421,6 +465,7 @@ func (h *streamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 判断当前节点是否是对端要访问的节点
 	wto := h.id.String()
 	if gto := r.Header.Get("X-Raft-To"); gto != wto {
 		h.lg.Warn(
@@ -435,10 +480,13 @@ func (h *streamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 联通成功，设置为ok
 	w.WriteHeader(http.StatusOK)
+	// 调用flush将响应数据发送到对端
 	w.(http.Flusher).Flush()
-
+	// 创建一个closer 用于等待连接关闭
 	c := newCloseNotifier()
+	// 创建一个与对端的连接实例
 	conn := &outgoingConn{
 		t:       t,
 		Writer:  w,
@@ -447,7 +495,9 @@ func (h *streamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		localID: h.tr.ID,
 		peerID:  from,
 	}
+	// 将连接传递到对应的streamWriter中
 	p.attachOutgoingConn(conn)
+	// 等待连接关闭，为什么不是直接结束而是要等待连接关闭呢？大概可能是通过这个来记录有多少个连接同时在联通吧
 	<-c.closeNotify()
 }
 
