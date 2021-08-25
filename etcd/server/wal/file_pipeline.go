@@ -63,10 +63,10 @@ func newFilePipeline(lg *zap.Logger, dir string, fileSize int64) *filePipeline {
 
 // Open returns a fresh file for writing. Rename the file before calling
 // Open again or there will be file collisions.
-func (fp *filePipeline) Open() (f *fileutil.LockedFile, err error) {
+func (fp *filePipeline) Open() (f *fileutil.LockedFile, err error) { //从预分配的临时文件中获取一个临时文件
 	select {
 	case f = <-fp.filec:
-	case err = <-fp.errc:
+	case err = <-fp.errc: //如果创建临时文件异常，则会将错误信息放入errc，并在此处被获取
 	}
 	return f, err
 }
@@ -84,12 +84,15 @@ func (fp *filePipeline) alloc() (f *fileutil.LockedFile, err error) {
 	if f, err = fileutil.LockFile(fpath, os.O_CREATE|os.O_WRONLY, fileutil.PrivateFileMode); err != nil {
 		return nil, err
 	}
+	// 尝试进行文件的空间预分配
 	if err = fileutil.Preallocate(f.File, fp.size, true); err != nil {
 		fp.lg.Error("failed to preallocate space when creating a new WAL", zap.Int64("size", fp.size), zap.Error(err))
 		f.Close()
 		return nil, err
 	}
+	// 递增创建的文件数
 	fp.count++
+	// 返回创建的临时文件
 	return f, nil
 }
 

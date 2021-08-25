@@ -100,9 +100,11 @@ func checkWalNames(lg *zap.Logger, names []string) []string {
 }
 
 func parseWALName(str string) (seq, index uint64, err error) {
+	// 如果不是.wal结尾的则报错
 	if !strings.HasSuffix(str, ".wal") {
 		return 0, 0, errBadWALName
 	}
+	// 解析文件名中的seq和index
 	_, err = fmt.Sscanf(str, "%016x-%016x.wal", &seq, &index)
 	return seq, index, err
 }
