@@ -25,15 +25,24 @@ import (
 // internal node with additional fields
 // PrevValue is the previous value of the node
 // TTL is time to live in second
+// 向外不直接暴露node节点，而是暴露NodeExtern
 type NodeExtern struct {
-	Key           string      `json:"key,omitempty"`
-	Value         *string     `json:"value,omitempty"`
-	Dir           bool        `json:"dir,omitempty"`
-	Expiration    *time.Time  `json:"expiration,omitempty"`
-	TTL           int64       `json:"ttl,omitempty"`
-	Nodes         NodeExterns `json:"nodes,omitempty"`
-	ModifiedIndex uint64      `json:"modifiedIndex,omitempty"`
-	CreatedIndex  uint64      `json:"createdIndex,omitempty"`
+	// 对应node实例中的path字段，为了实现排序，NodeExtern实现了sort接口，在其Less()方法中比较的就是key
+	Key string `json:"key,omitempty"`
+	// 对应键值对节点中的Value
+	Value *string `json:"value,omitempty"`
+	// 对应节点是否为目录节点
+	Dir bool `json:"dir,omitempty"`
+	// 对应节点的过期时间，如果对应节点是永久节点则为nil
+	Expiration *time.Time `json:"expiration,omitempty"`
+	// 对应节点的存活时间，如果对应节点是永久节点则为0
+	TTL int64 `json:"ttl,omitempty"`
+	// 当为目录节点时，子节点对应的NodeExterns实例
+	Nodes NodeExterns `json:"nodes,omitempty"`
+	// 对应node的ModifiedIndex
+	ModifiedIndex uint64 `json:"modifiedIndex,omitempty"`
+	// 对应node的CreatedIndex
+	CreatedIndex uint64 `json:"createdIndex,omitempty"`
 }
 
 func (eNode *NodeExtern) loadInternalNode(n *node, recursive, sorted bool, clock clockwork.Clock) {

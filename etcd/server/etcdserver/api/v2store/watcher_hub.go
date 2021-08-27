@@ -30,14 +30,18 @@ import (
 // watcher to get a continuous event history. Or a watcher might miss the
 // event happens between the end of the first watch command and the start
 // of the second command.
+// watcher与节点路径之间的映射关系
 type watcherHub struct {
 	// count must be the first element to keep 64-bit alignment for atomic
 	// access
 
+	// 当前保存的watcher个数
 	count int64 // current number of watchers.
 
-	mutex        sync.Mutex
-	watchers     map[string]*list.List
+	mutex sync.Mutex
+	// 维护节点与其watcher的对应关系集合，其中key为node.Path,value则是watcher列表
+	watchers map[string]*list.List
+	// 保存最近修改发生的event实例，在其达到上限后，会淘汰最开始的event
 	EventHistory *EventHistory
 }
 
@@ -58,6 +62,7 @@ func newWatchHub(capacity int) *watcherHub {
 // If index is zero, watch will start from the current index + 1.
 func (wh *watcherHub) watch(key string, recursive, stream bool, index, storeIndex uint64) (Watcher, *v2error.Error) {
 	reportWatchRequest()
+	// 查找是否有事件触发了待添加的watch
 	event, err := wh.EventHistory.scan(key, recursive, index)
 
 	if err != nil {
@@ -67,48 +72,59 @@ func (wh *watcherHub) watch(key string, recursive, stream bool, index, storeInde
 
 	w := &watcher{
 		eventChan:  make(chan *Event, 100), // use a buffered channel
-		recursive:  recursive,
-		stream:     stream,
-		sinceIndex: index,
-		startIndex: storeIndex,
-		hub:        wh,
+		recursive:  recursive,              //是否监听子节点
+		stream:     stream,                 //是否为流式类型
+		sinceIndex: index,                  //根据index设置从哪里开始监听
+		startIndex: storeIndex,             //创建该实例的index值
+		hub:        wh,                     //关联hub实例
 	}
 
 	wh.mutex.Lock()
 	defer wh.mutex.Unlock()
 	// If the event exists in the known history, append the EtcdIndex and return immediately
-	if event != nil {
+	if event != nil { //如果事件不为空
 		ne := event.Clone()
 		ne.EtcdIndex = storeIndex
+		// 将事件的克隆写入chan，并返回
 		w.eventChan <- ne
 		return w, nil
 	}
 
+	// 获取对应key的watcher list
 	l, ok := wh.watchers[key]
 
 	var elem *list.Element
 
 	if ok { // add the new watcher to the back of the list
-		elem = l.PushBack(w)
+		elem = l.PushBack(w) //将当前watcher添加到列表尾部
 	} else { // create a new list and add the new watcher
+		// 如果列表不存在则创建一个
 		l = list.New()
 		elem = l.PushBack(w)
 		wh.watchers[key] = l
 	}
 
+	// 初始化remove函数
 	w.remove = func() {
+		// 如果已被删除则直接返回
 		if w.removed { // avoid removing it twice
 			return
 		}
+		// 设置已删除标志
 		w.removed = true
+		// 将当前watcher从hub中删除
 		l.Remove(elem)
+		// 原子的更新hub中保存的watcher个数
 		atomic.AddInt64(&wh.count, -1)
+		// 更新普罗米修斯监控数据
 		reportWatcherRemoved()
+		// 如果没有任何监听，则将其hub中对应key的watcher列表删除
 		if l.Len() == 0 {
 			delete(wh.watchers, key)
 		}
 	}
 
+	// 更新当前watcher的数量
 	atomic.AddInt64(&wh.count, 1)
 	reportWatcherAdded()
 
@@ -121,8 +137,10 @@ func (wh *watcherHub) add(e *Event) {
 
 // notify function accepts an event and notify to the watchers.
 func (wh *watcherHub) notify(e *Event) {
+	// 将修改操作的event实例保存到eventHistory
 	e = wh.EventHistory.addEvent(e) // add event into the eventHistory
 
+	// 按照"/"分割节点路径
 	segments := strings.Split(e.Node.Key, "/")
 
 	currPath := "/"
@@ -130,7 +148,9 @@ func (wh *watcherHub) notify(e *Event) {
 	// walk through all the segments of the path and notify the watchers
 	// if the path is "/foo/bar", it will notify watchers with path "/",
 	// "/foo" and "/foo/bar"
-
+	// 按层级依次调用notifyWatchers
+	// 比如说 /foo/bar
+	// 那么/foo 可能触发，/foo/bar 也可能触发
 	for _, segment := range segments {
 		currPath = path.Join(currPath, segment)
 		// notify the watchers who interests in the changes of current path

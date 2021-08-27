@@ -50,8 +50,10 @@ var (
 	}
 )
 
+// 通过文件的方式管理快照
 type Snapshotter struct {
-	lg  *zap.Logger
+	lg *zap.Logger
+	// 指定存储快照的目录位置
 	dir string
 }
 
@@ -65,6 +67,7 @@ func New(lg *zap.Logger, dir string) *Snapshotter {
 	}
 }
 
+//存储快照 如果快照为空则直接返回
 func (s *Snapshotter) SaveSnap(snapshot raftpb.Snapshot) error {
 	if raft.IsEmptySnap(snapshot) {
 		return nil
@@ -72,26 +75,38 @@ func (s *Snapshotter) SaveSnap(snapshot raftpb.Snapshot) error {
 	return s.save(&snapshot)
 }
 
+// 存储快照的实际方法
 func (s *Snapshotter) save(snapshot *raftpb.Snapshot) error {
 	start := time.Now()
 
+	// 创建快照名，快照名由三部分组成，分别是快照所涵盖的最后一条entry的index、term和".snap"
 	fname := fmt.Sprintf("%016x-%016x%s", snapshot.Metadata.Term, snapshot.Metadata.Index, snapSuffix)
+	// 将快照数据序列化
 	b := pbutil.MustMarshal(snapshot)
+	// 计算校验码
 	crc := crc32.Update(0, crcTable, b)
+	// 将序列化后的数据封装成Snapshot实例
+	// raftpb.Snapshot 包含有快照元数据（最后一个entry的index、term等）和快照数据
+	// snappb.Snapshot 包含raftpb.Snapshot序列化后的数据和校验码
 	snap := snappb.Snapshot{Crc: crc, Data: b}
+	// 将snappb.Snapshot序列化
 	d, err := snap.Marshal()
 	if err != nil {
 		return err
 	}
+	// 记录统计数据到普罗米修斯
 	snapMarshallingSec.Observe(time.Since(start).Seconds())
 
+	// 拼接文件路径
 	spath := filepath.Join(s.dir, fname)
 
 	fsyncStart := time.Now()
+	// 写入快照并刷盘
 	err = pioutil.WriteAndSyncFile(spath, d, 0666)
+	// 记录统计数据到普罗米修斯
 	snapFsyncSec.Observe(time.Since(fsyncStart).Seconds())
 
-	if err != nil {
+	if err != nil { //如果发生错误，则删除快照文件
 		s.lg.Warn("failed to write a snap file", zap.String("path", spath), zap.Error(err))
 		rerr := os.Remove(spath)
 		if rerr != nil {
@@ -99,12 +114,13 @@ func (s *Snapshotter) save(snapshot *raftpb.Snapshot) error {
 		}
 		return err
 	}
-
+	// 记录统计数据到普罗米修斯
 	snapSaveSec.Observe(time.Since(start).Seconds())
 	return nil
 }
 
 // Load returns the newest snapshot.
+// 从文件读取快照
 func (s *Snapshotter) Load() (*raftpb.Snapshot, error) {
 	return s.loadMatching(func(*raftpb.Snapshot) bool { return true })
 }
@@ -124,12 +140,15 @@ func (s *Snapshotter) LoadNewestAvailable(walSnaps []walpb.Snapshot) (*raftpb.Sn
 
 // loadMatching returns the newest snapshot where matchFn returns true.
 func (s *Snapshotter) loadMatching(matchFn func(*raftpb.Snapshot) bool) (*raftpb.Snapshot, error) {
+	// 获取全部的快照文件名称，过滤不合法的文件，且会为文件进行排序
 	names, err := s.snapNames()
 	if err != nil {
 		return nil, err
 	}
 	var snap *raftpb.Snapshot
 	for _, name := range names {
+		// 按顺序读取快照文件，直到读取到第一个可用的快照文件
+		// 在快照文件读取失败时会为其文件后缀添加".broken"，以防止下一次再读取到该文件
 		if snap, err = loadSnap(s.lg, s.dir, name); err == nil && matchFn(snap) {
 			return snap, nil
 		}
@@ -137,10 +156,13 @@ func (s *Snapshotter) loadMatching(matchFn func(*raftpb.Snapshot) bool) (*raftpb
 	return nil, ErrNoSnapshot
 }
 
+// 读取快照文件，如果读取失败则修改文件后缀
 func loadSnap(lg *zap.Logger, dir, name string) (*raftpb.Snapshot, error) {
+	// 获取快照文件路径
 	fpath := filepath.Join(dir, name)
+	// 读取快照文件
 	snap, err := Read(lg, fpath)
-	if err != nil {
+	if err != nil { //如果发生错误，则添加文件后缀
 		brokenPath := fpath + ".broken"
 		if lg != nil {
 			lg.Warn("failed to read a snap file", zap.String("path", fpath), zap.Error(err))
@@ -159,7 +181,9 @@ func loadSnap(lg *zap.Logger, dir, name string) (*raftpb.Snapshot, error) {
 }
 
 // Read reads the snapshot named by snapname and returns the snapshot.
+// 读取快照文件
 func Read(lg *zap.Logger, snapname string) (*raftpb.Snapshot, error) {
+	// 读取文件
 	b, err := ioutil.ReadFile(snapname)
 	if err != nil {
 		if lg != nil {
@@ -176,6 +200,7 @@ func Read(lg *zap.Logger, snapname string) (*raftpb.Snapshot, error) {
 	}
 
 	var serializedSnap snappb.Snapshot
+	// 反序列化快照文件
 	if err = serializedSnap.Unmarshal(b); err != nil {
 		if lg != nil {
 			lg.Warn("failed to unmarshal snappb.Snapshot", zap.String("path", snapname), zap.Error(err))
@@ -190,6 +215,7 @@ func Read(lg *zap.Logger, snapname string) (*raftpb.Snapshot, error) {
 		return nil, ErrEmptySnapshot
 	}
 
+	// 计算校验码并验证
 	crc := crc32.Update(0, crcTable, serializedSnap.Data)
 	if crc != serializedSnap.Crc {
 		if lg != nil {
@@ -202,6 +228,7 @@ func Read(lg *zap.Logger, snapname string) (*raftpb.Snapshot, error) {
 		return nil, ErrCRCMismatch
 	}
 
+	// 反序列化得到raftpb.Snapshot
 	var snap raftpb.Snapshot
 	if err = snap.Unmarshal(serializedSnap.Data); err != nil {
 		if lg != nil {

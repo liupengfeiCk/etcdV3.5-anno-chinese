@@ -25,12 +25,19 @@ const (
 	Expire           = "expire"
 )
 
+// v2存储在收到调用请求时，会将请求结果封装成event并返回
 type Event struct {
-	Action    string      `json:"action"`
-	Node      *NodeExtern `json:"node,omitempty"`
-	PrevNode  *NodeExtern `json:"prevNode,omitempty"`
-	EtcdIndex uint64      `json:"-"`
-	Refresh   bool        `json:"refresh,omitempty"`
+	// 该event实例对应的操作，有Get、Create、Set、Update、Delete、CompareAndSwap、CompareAndDelete、Expire
+	Action string `json:"action"`
+	// 当前操作节点对应的NodeExtern实例
+	Node *NodeExtern `json:"node,omitempty"`
+	// 记录该节点在这次event之前状态对应的NodeExtern实例
+	PrevNode *NodeExtern `json:"prevNode,omitempty"`
+	// 记录操作完成之后的CurrentIndex
+	EtcdIndex uint64 `json:"-"`
+	// Set、Update、CompareAndSwap操作时，Refresh可能被设置为true
+	// 当Refresh被设置为true时，表示该操作只进行刷新操作（如更改节点过期时间），不会改变value的值，watcher不会被触发
+	Refresh bool `json:"refresh,omitempty"`
 }
 
 func newEvent(action string, key string, modifiedIndex, createdIndex uint64) *Event {

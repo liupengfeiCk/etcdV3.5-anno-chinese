@@ -14,14 +14,21 @@
 
 package v2store
 
+// 先进先出的环形event队列
 type eventQueue struct {
-	Events   []*Event
-	Size     int
-	Front    int
-	Back     int
+	// 底层存储event的数组
+	Events []*Event
+	// 当前存储的event数量
+	Size int
+	// 队列中第一个event的下标
+	Front int
+	// 队列中最后一个event的next的下标
+	Back int
+	// events字段的长度
 	Capacity int
 }
 
+// 添加元素，在队列被填满时，将会覆盖最先添加的元素
 func (eq *eventQueue) insert(e *Event) {
 	eq.Events[eq.Back] = e
 	eq.Back = (eq.Back + 1) % eq.Capacity

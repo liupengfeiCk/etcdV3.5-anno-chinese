@@ -20,15 +20,28 @@ type Watcher interface {
 	Remove()
 }
 
+// 用于监听节点数据变更
 type watcher struct {
-	eventChan  chan *Event
-	stream     bool
-	recursive  bool
+	// 当watcher实例被修改操作触发后，会将对应的event实例写入到这个chan中，后续由网络层接收并通知客户端
+	// 在创建watcher实例时会将该chan的缓冲设置为100
+	eventChan chan *Event
+	// 标记当前watcher是否为stream类型
+	// 当前stream watcher被触发一次后并不会被直接删除，而是持续保持监听，并返回一系列的event
+	// 支持得并不好
+	stream bool
+	// 标记当前watcher是否监听其当前监听路径的子节点
+	recursive bool
+	// 标记该watcher是从那个CurrentIndex开始监听的
 	sinceIndex uint64
+	// 记录了该watcher创建时的CurrentIndex
 	startIndex uint64
-	hub        *watcherHub
-	removed    bool
-	remove     func()
+	// 在Hub中维护了watcher与所监听节点路径的对应关系
+	// 这是对watcherHub的一个引用
+	hub *watcherHub
+	// 标记当前watcher是否已被删除
+	removed bool
+	// 用于删除当前watcher的回调函数
+	remove func()
 }
 
 func (w *watcher) EventChan() chan *Event {
@@ -41,6 +54,11 @@ func (w *watcher) StartIndex() uint64 {
 
 // notify function notifies the watcher. If the watcher interests in the given path,
 // the function will return true.
+// 监听回调
+// 情况有3种：
+// 1.当发生修改事件的就是被监听的节点时
+// 2.当前监听的是目录节点，且设置了监听其子节点变更时
+// 3.当前事件为删除，需通知其所有子节点的监听
 func (w *watcher) notify(e *Event, originalPath bool, deleted bool) bool {
 	// watcher is interested the path in three cases and under one condition
 	// the condition is that the event happens after the watcher's sinceIndex
@@ -57,14 +75,17 @@ func (w *watcher) notify(e *Event, originalPath bool, deleted bool) bool {
 	// at the file we need to delete.
 	// For example a watcher is watching at "/foo/bar". And we deletes "/foo". The watcher
 	// should get notified even if "/foo" is not the path it is watching.
-	if (w.recursive || originalPath || deleted) && e.Index() >= w.sinceIndex {
+	if (w.recursive || //当前监听是目录节点，且需要监听子节点变更
+		originalPath || //当前发生事件的就是被监听的节点
+		deleted) && // 当前事件为删除
+		e.Index() >= w.sinceIndex { //当前事件的发生inde在监听发生index之后
 		// We cannot block here if the eventChan capacity is full, otherwise
 		// etcd will hang. eventChan capacity is full when the rate of
 		// notifications are higher than our send rate.
 		// If this happens, we close the channel.
 		select {
-		case w.eventChan <- e:
-		default:
+		case w.eventChan <- e: //发送监听
+		default: //如果eventChan已满，则删除该watcher，这里将会导致事件丢失
 			// We have missed a notification. Remove the watcher.
 			// Removing the watcher also closes the eventChan.
 			w.remove()
