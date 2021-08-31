@@ -162,17 +162,22 @@ func (wh *watcherHub) notifyWatchers(e *Event, nodePath string, deleted bool) {
 	wh.mutex.Lock()
 	defer wh.mutex.Unlock()
 
+	// 获取监听指定节点的列表
 	l, ok := wh.watchers[nodePath]
 	if ok {
 		curr := l.Front()
-
+		// 遍历list列表，list是一个链表
 		for curr != nil {
 			next := curr.Next() // save reference to the next one in the list
 
+			// 获取watcher实例
 			w, _ := curr.Value.(*watcher)
-
+			// 标记nodePath是否就是Event中node的key
+			// 主要是为了用来判断当前发生事件的节点是否就是被监听的节点
 			originalPath := e.Node.Key == nodePath
+			// 尝试回调
 			if (originalPath || !isHidden(nodePath, e.Node.Key)) && w.notify(e, originalPath, deleted) {
+				// 检测是否为stream watcher，如果不是则要将其删除
 				if !w.stream { // do not remove the stream watcher
 					// if we successfully notify a watcher
 					// we need to remove the watcher from the list
@@ -187,6 +192,7 @@ func (wh *watcherHub) notifyWatchers(e *Event, nodePath string, deleted bool) {
 			curr = next // update current to the next element in the list
 		}
 
+		// 如果list为空，则删除该watchers列表
 		if l.Len() == 0 {
 			// if we have notified all watcher in the list
 			// we can delete the list

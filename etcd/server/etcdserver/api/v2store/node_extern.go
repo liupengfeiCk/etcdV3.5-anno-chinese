@@ -26,6 +26,9 @@ import (
 // PrevValue is the previous value of the node
 // TTL is time to live in second
 // 向外不直接暴露node节点，而是暴露NodeExtern
+// 暴露NodeExtern的好处是：
+// 1.如果直接暴露node，相当于暴露了其下所有子节点，而只暴露NodeExtern则可以选择是否暴露子节点
+// 2.可以对其进行排序等操作
 type NodeExtern struct {
 	// 对应node实例中的path字段，为了实现排序，NodeExtern实现了sort接口，在其Less()方法中比较的就是key
 	Key string `json:"key,omitempty"`
@@ -45,6 +48,7 @@ type NodeExtern struct {
 	CreatedIndex uint64 `json:"createdIndex,omitempty"`
 }
 
+// 将node封装为NodeExtern
 func (eNode *NodeExtern) loadInternalNode(n *node, recursive, sorted bool, clock clockwork.Clock) {
 	if n.IsDir() { // node is a directory
 		eNode.Dir = true
