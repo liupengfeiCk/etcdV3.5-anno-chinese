@@ -22,14 +22,20 @@ import (
 	"go.uber.org/zap"
 )
 
+// index索引，是对btree的一层封装
 type index interface {
+	// 查询指定key
 	Get(key []byte, atRev int64) (rev, created revision, ver int64, err error)
+	// 范围查询
 	Range(key, end []byte, atRev int64) ([][]byte, []revision)
 	Revisions(key, end []byte, atRev int64, limit int) ([]revision, int)
 	CountRevisions(key, end []byte, atRev int64) int
+	// 添加元素
 	Put(key []byte, rev revision)
+	// 添加tombstone（墓碑）
 	Tombstone(key []byte, rev revision) error
 	RangeSince(key, end []byte, rev int64) []revision
+	// 压缩全部的keyIndex
 	Compact(rev int64) map[revision]struct{}
 	Keep(rev int64) map[revision]struct{}
 	Equal(b index) bool
@@ -40,32 +46,42 @@ type index interface {
 
 type treeIndex struct {
 	sync.RWMutex
+	// btree实例
 	tree *btree.BTree
 	lg   *zap.Logger
 }
 
 func newTreeIndex(lg *zap.Logger) index {
+	// 初始化btree
 	return &treeIndex{
+		// 初始化树的度为32，即除了根节点，其他每个节点至少有32个元素，每个节点最多有64个元素
 		tree: btree.New(32),
 		lg:   lg,
 	}
 }
 
+// 1.向tree中添加key实例
+// 2.为key添加revision
 func (ti *treeIndex) Put(key []byte, rev revision) {
+	// 创建key实例
 	keyi := &keyIndex{key: key}
 
 	ti.Lock()
 	defer ti.Unlock()
+	// 尝试从tree中获取key
 	item := ti.tree.Get(keyi)
-	if item == nil {
+	if item == nil { // 如果不存在
+		// 添加revision并设置该key
 		keyi.put(ti.lg, rev.main, rev.sub)
 		ti.tree.ReplaceOrInsert(keyi)
 		return
 	}
+	// 如果存在，直接添加revision
 	okeyi := item.(*keyIndex)
 	okeyi.put(ti.lg, rev.main, rev.sub)
 }
 
+// 在指定的key中获取revision信息
 func (ti *treeIndex) Get(key []byte, atRev int64) (modified, created revision, ver int64, err error) {
 	keyi := &keyIndex{key: key}
 	ti.RLock()
@@ -76,12 +92,14 @@ func (ti *treeIndex) Get(key []byte, atRev int64) (modified, created revision, v
 	return keyi.get(ti.lg, atRev)
 }
 
+// 查询指定keyIndex
 func (ti *treeIndex) KeyIndex(keyi *keyIndex) *keyIndex {
 	ti.RLock()
 	defer ti.RUnlock()
 	return ti.keyIndex(keyi)
 }
 
+// 查询指定keyIndex，内部实现
 func (ti *treeIndex) keyIndex(keyi *keyIndex) *keyIndex {
 	if item := ti.tree.Get(keyi); item != nil {
 		return item.(*keyIndex)
@@ -89,6 +107,7 @@ func (ti *treeIndex) keyIndex(keyi *keyIndex) *keyIndex {
 	return nil
 }
 
+// 抽象访问方法
 func (ti *treeIndex) visit(key, end []byte, f func(ki *keyIndex) bool) {
 	keyi, endi := &keyIndex{key: key}, &keyIndex{key: end}
 
@@ -96,9 +115,11 @@ func (ti *treeIndex) visit(key, end []byte, f func(ki *keyIndex) bool) {
 	defer ti.RUnlock()
 
 	ti.tree.AscendGreaterOrEqual(keyi, func(item btree.Item) bool {
+		// 忽略end之后的元素
 		if len(endi.key) > 0 && !item.Less(endi) {
 			return false
 		}
+		// 比较方法不满足则忽略
 		if !f(item.(*keyIndex)) {
 			return false
 		}
@@ -144,14 +165,16 @@ func (ti *treeIndex) CountRevisions(key, end []byte, atRev int64) int {
 	return total
 }
 
+// 范围查询方法
 func (ti *treeIndex) Range(key, end []byte, atRev int64) (keys [][]byte, revs []revision) {
-	if end == nil {
+	if end == nil { //如果end为空则等同于get方法
 		rev, _, _, err := ti.Get(key, atRev)
 		if err != nil {
 			return nil, nil
 		}
 		return [][]byte{key}, []revision{rev}
 	}
+	// 通过访问方法获取所有满足条件的kv
 	ti.visit(key, end, func(ki *keyIndex) bool {
 		if rev, _, _, err := ki.get(ti.lg, atRev); err == nil {
 			revs = append(revs, rev)
@@ -179,6 +202,8 @@ func (ti *treeIndex) Tombstone(key []byte, rev revision) error {
 // RangeSince returns all revisions from key(including) to end(excluding)
 // at or after the given rev. The returned slice is sorted in the order
 // of revision.
+// 返回key到end区间满足main revision 大于 rev的revision信息
+// 其中返回的revision不是按照key的顺序排序的，而是按照revision.GreaterThan()
 func (ti *treeIndex) RangeSince(key, end []byte, rev int64) []revision {
 	keyi := &keyIndex{key: key}
 

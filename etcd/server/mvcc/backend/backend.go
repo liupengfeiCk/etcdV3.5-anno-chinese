@@ -45,28 +45,38 @@ var (
 	minSnapshotWarningTimeout = 30 * time.Second
 )
 
+// 将底层存储与上层解藕，并定义底层存储应该提供的接口
 type Backend interface {
 	// ReadTx returns a read transaction. It is replaced by ConcurrentReadTx in the main data path, see #10523.
+	// 创建一个只读事务
 	ReadTx() ReadTx
+	// 创建一个批量事务
 	BatchTx() BatchTx
 	// ConcurrentReadTx returns a non-blocking read transaction.
 	ConcurrentReadTx() ReadTx
 
+	// 创建快照
 	Snapshot() Snapshot
 	Hash(ignores func(bucketName, keyName []byte) bool) (uint32, error)
 	// Size returns the current size of the backend physically allocated.
 	// The backend can hold DB space that is not utilized at the moment,
 	// since it can conduct pre-allocation or spare unused space for recycling.
 	// Use SizeInUse() instead for the actual DB size.
+	// 获取当前分配的总字节数
 	Size() int64
 	// SizeInUse returns the current size of the backend logically in use.
 	// Since the backend can manage free space in a non-byte unit such as
 	// number of pages, the returned value can be not exactly accurate in bytes.
+	//获取当前已经使用的总字节数
 	SizeInUse() int64
 	// OpenReadTxN returns the number of currently open read transactions in the backend.
+	// 返回当前打开的字节数
 	OpenReadTxN() int64
+	// 碎片整理
 	Defrag() error
+	// 提交批量事务
 	ForceCommit()
+	// 关闭Backend
 	Close() error
 }
 
@@ -90,57 +100,90 @@ type backend struct {
 	// 64-bit aligned, otherwise 32-bit tests will crash
 
 	// size is the number of bytes allocated in the backend
+	// 已分配的总字节数
 	size int64
 	// sizeInUse is the number of bytes actually used in the backend
+	// 已存储的总字节数
 	sizeInUse int64
 	// commits counts number of commits since start
+	// 从启动到目前为止已经提交的事务数
 	commits int64
 	// openReadTxN is the number of currently open read transactions in the backend
+	// 打开的读事务数量
 	openReadTxN int64
 	// mlock prevents backend database file to be swapped
+	// 防止database文件交换的标志
+	// 当mlock被设置为true时，DB文件将被锁定在内存中
 	mlock bool
 
+	// 这个读写锁用来限制对boltDB的操作
+	// 在对boltDB进行碎片整理的时候获取写锁
+	// 在创建事务等其他操作时获取读锁
+	// 目的在于，如果进行磁盘整理，那么就不应该执行获取事务等对blotDB文件进行读写的操作
 	mu sync.RWMutex
+	// 底层的boltDB
 	db *bolt.DB
 
+	// 两次批量读写事务提交的最大时间差
 	batchInterval time.Duration
-	batchLimit    int
-	batchTx       *batchTxBuffered
+	// 指定一次批量操作中最大的操作数
+	batchLimit int
+	// 批量读写事务
+	// batchTxBuffered 在 batchTx 的基础之上提供了缓存功能，两者都实现了BatchTx接口
+	batchTx *batchTxBuffered
 
+	// 只读事务，实现了ReadTx接口
 	readTx *readTx
 	// txReadBufferCache mirrors "txReadBuffer" within "readTx" -- readTx.baseReadTx.buf.
 	// When creating "concurrentReadTx":
 	// - if the cache is up-to-date, "readTx.baseReadTx.buf" copy can be skipped
 	// - if the cache is empty or outdated, "readTx.baseReadTx.buf" copy is required
+	// 事务读缓存
+	// 如果缓存是最新的，则可以跳过从"readTx.baseReadTx.buf"中拷贝
+	// 如果缓存不是最新的或为空，则必须拷贝
 	txReadBufferCache txReadBufferCache
 
+	// 关闭相关
 	stopc chan struct{}
 	donec chan struct{}
 
+	// 在事务执行期间的钩子，具体做什么再看
 	hooks Hooks
 
 	lg *zap.Logger
 }
 
+// backend的配置，用于初始化backend
 type BackendConfig struct {
 	// Path is the file path to the backend file.
+	// blotDB数据库文件的路径
 	Path string
 	// BatchInterval is the maximum time before flushing the BatchTx.
+	// 提交两次批量事务的最大时间差，用来初始化backend的batchInterval
 	BatchInterval time.Duration
 	// BatchLimit is the maximum puts before flushing the BatchTx.
+	// 指定批量事务能包含的最多操作个数
+	// 超过这个阈值后，当前批量事务会自动提交。
+	// 该字段用来初始化backend的batchLimit，默认值是10000
 	BatchLimit int
 	// BackendFreelistType is the backend boltdb's freelist type.
+	// backend中freelist（空闲列表）的类型
 	BackendFreelistType bolt.FreelistType
 	// MmapSize is the number of bytes to mmap for the backend.
+	// 用来设置mmap中使用的内存大小，该字段会在创建blotDB时使用
+	// blotDB用mmap技术对数据文件进行映射
 	MmapSize uint64
 	// Logger logs backend-side operations.
 	Logger *zap.Logger
 	// UnsafeNoFsync disables all uses of fsync.
+	// 是否禁用同步刷盘
 	UnsafeNoFsync bool `json:"unsafe-no-fsync"`
 	// Mlock prevents backend database file to be swapped
+	// 防止database文件被交换
 	Mlock bool
 
 	// Hooks are getting executed during lifecycle of Backend's transactions.
+	// 事务执行中的钩子函数，具体做什么目前不知道
 	Hooks Hooks
 }
 
@@ -156,6 +199,7 @@ func New(bcfg BackendConfig) Backend {
 	return newBackend(bcfg)
 }
 
+// 创建一个默认的backend，基于blotDB
 func NewDefaultBackend(path string) Backend {
 	bcfg := DefaultBackendConfig()
 	bcfg.Path = path
@@ -167,16 +211,19 @@ func newBackend(bcfg BackendConfig) *backend {
 		bcfg.Logger = zap.NewNop()
 	}
 
+	// 初始化blotDB的参数
 	bopts := &bolt.Options{}
-	if boltOpenOptions != nil {
+	if boltOpenOptions != nil { //如果有预定义的配置，则直接获取这个配置
 		*bopts = *boltOpenOptions
 	}
-	bopts.InitialMmapSize = bcfg.mmapSize()
-	bopts.FreelistType = bcfg.BackendFreelistType
-	bopts.NoSync = bcfg.UnsafeNoFsync
-	bopts.NoGrowSync = bcfg.UnsafeNoFsync
-	bopts.Mlock = bcfg.Mlock
+	// 从传入的config中初始化下面的这些参数
+	bopts.InitialMmapSize = bcfg.mmapSize()       //mmap使用的内存大小
+	bopts.FreelistType = bcfg.BackendFreelistType //空闲列表的类型
+	bopts.NoSync = bcfg.UnsafeNoFsync             // 是否同步刷盘
+	bopts.NoGrowSync = bcfg.UnsafeNoFsync         // 是否同步Grow
+	bopts.Mlock = bcfg.Mlock                      //是否防止data文件被交换
 
+	// 创建bolt.DB实例
 	db, err := bolt.Open(bcfg.Path, 0600, bopts)
 	if err != nil {
 		bcfg.Logger.Panic("failed to open database", zap.String("path", bcfg.Path), zap.Error(err))
@@ -184,6 +231,7 @@ func newBackend(bcfg BackendConfig) *backend {
 
 	// In future, may want to make buffering optional for low-concurrency systems
 	// or dynamically swap between buffered/non-buffered depending on workload.
+	// 创建backend
 	b := &backend{
 		db: db,
 
@@ -214,10 +262,13 @@ func newBackend(bcfg BackendConfig) *backend {
 		lg: bcfg.Logger,
 	}
 
+	// 创建BatchTxBuffered实例并初始化backend.batchTx
 	b.batchTx = newBatchTxBuffered(b)
 	// We set it after newBatchTxBuffered to skip the 'empty' commit.
+	// 将hook函数设置为跳过空的提交
 	b.hooks = bcfg.Hooks
 
+	// 开启一个线程，其中会定时提交当前的批量读写事务，并开启新的批量读写事务
 	go b.run()
 	return b
 }
@@ -314,24 +365,32 @@ func (b *backend) ForceCommit() {
 	b.batchTx.Commit()
 }
 
+// 用当前blotDB中的数据创建快照
 func (b *backend) Snapshot() Snapshot {
+	// 提交当前的读写事务，主要是为了提交还在缓冲区的操作
 	b.batchTx.Commit()
 
 	b.mu.RLock()
 	defer b.mu.RUnlock()
+	// 开启一个只读事务
 	tx, err := b.db.Begin(false)
 	if err != nil {
 		b.lg.Fatal("failed to begin tx", zap.Error(err))
 	}
 
 	stopc, donec := make(chan struct{}), make(chan struct{})
+	// 获取整个DB的总字节数
 	dbBytes := tx.Size()
+	// 启动一个单独的线程用来检测快照数据是否已经发送完成
 	go func() {
 		defer close(donec)
 		// sendRateBytes is based on transferring snapshot data over a 1 gigabit/s connection
 		// assuming a min tcp throughput of 100MB/s.
+		// 假设发送快照的速度是100MB每秒
 		var sendRateBytes int64 = 100 * 1024 * 1024
+		// 创建定时器，截止到预计的发送完成时间
 		warningTimeout := time.Duration(int64((float64(dbBytes) / float64(sendRateBytes)) * float64(time.Second)))
+		// 如果截止时间小于30秒，则默认为30秒
 		if warningTimeout < minSnapshotWarningTimeout {
 			warningTimeout = minSnapshotWarningTimeout
 		}
@@ -340,7 +399,7 @@ func (b *backend) Snapshot() Snapshot {
 		defer ticker.Stop()
 		for {
 			select {
-			case <-ticker.C:
+			case <-ticker.C: //如果超时则发出提示
 				b.lg.Warn(
 					"snapshotting taking too long to transfer",
 					zap.Duration("taking", time.Since(start)),
@@ -348,13 +407,14 @@ func (b *backend) Snapshot() Snapshot {
 					zap.String("size", humanize.Bytes(uint64(dbBytes))),
 				)
 
-			case <-stopc:
+			case <-stopc: //如果stopc接收到数据，说明已经发送完成，计算发送耗时
 				snapshotTransferSec.Observe(time.Since(start).Seconds())
 				return
 			}
 		}
 	}()
 
+	// 将tx封装进backend.snapshot,上层通过这个来获取DB中的数据并生成快照
 	return &snapshot{tx, stopc, donec}
 }
 
@@ -397,9 +457,10 @@ func (b *backend) SizeInUse() int64 {
 	return atomic.LoadInt64(&b.sizeInUse)
 }
 
+// 根据batchInterval定时提交批量读写事务，并创建新的读写事务
 func (b *backend) run() {
 	defer close(b.donec)
-	t := time.NewTimer(b.batchInterval)
+	t := time.NewTimer(b.batchInterval) //创建定时器
 	defer t.Stop()
 	for {
 		select {
@@ -408,10 +469,11 @@ func (b *backend) run() {
 			b.batchTx.CommitAndStop()
 			return
 		}
+		// 如果待提交的事务不为空
 		if b.batchTx.safePending() != 0 {
-			b.batchTx.Commit()
+			b.batchTx.Commit() //提交读写事务，并创建新的事务
 		}
-		t.Reset(b.batchInterval)
+		t.Reset(b.batchInterval) //重制定时器
 	}
 }
 
@@ -430,12 +492,15 @@ func (b *backend) Defrag() error {
 	return b.defrag()
 }
 
+// 整理磁盘碎片
+// 实际上就是用一个新的DB文件来复制当前DB文件，复制时是顺序写，所以会提高bucket的填充比例
 func (b *backend) defrag() error {
 	now := time.Now()
 
 	// TODO: make this non-blocking?
 	// lock batchTx to ensure nobody is using previous tx, and then
 	// close previous ongoing tx.
+	// 在进行复制时需要获取所有的锁，包括batchTx、backend、readTx
 	b.batchTx.Lock()
 	defer b.batchTx.Unlock()
 
@@ -447,12 +512,15 @@ func (b *backend) defrag() error {
 	b.readTx.Lock()
 	defer b.readTx.Unlock()
 
+	// 提交当前批量读写事务，且在提交后不会立刻打开新的事务（stop设置为true）
+	// 为了保证在执行碎片整理时，其他对数据库的操作都无法执行，所以提交后并不会马上开启新的事务
 	b.batchTx.unsafeCommit(true)
 
 	b.batchTx.tx = nil
 
 	// Create a temporary file to ensure we start with a clean slate.
 	// Snapshotter.cleanupSnapdir cleans up any of these that are found during startup.
+	// 在DB文件目录下创建"db.tmp.*"类型的临时文件（*被TempFile方法替换为一个随机值）
 	dir := filepath.Dir(b.db.Path())
 	temp, err := ioutil.TempFile(dir, "db.tmp.*")
 	if err != nil {
@@ -462,18 +530,25 @@ func (b *backend) defrag() error {
 	if boltOpenOptions != nil {
 		options = *boltOpenOptions
 	}
+	// 设置操作打开的文件
 	options.OpenFile = func(_ string, _ int, _ os.FileMode) (file *os.File, err error) {
 		return temp, nil
 	}
 	// Don't load tmp db into memory regardless of opening options
+	// 不允许将tmp文件锁定在内存中
+	// 无论如何，都不能将tmp文件加载进内存
 	options.Mlock = false
+	// 获取文件名
 	tdbp := temp.Name()
+	// 通过这个文件创建blotDB
 	tmpdb, err := bolt.Open(tdbp, 0600, &options)
 	if err != nil {
 		return err
 	}
 
+	// 获取backend中DB文件的路径
 	dbp := b.db.Path()
+	// 获取其分配空间和已使用空间
 	size1, sizeInUse1 := b.Size(), b.SizeInUse()
 	if b.lg != nil {
 		b.lg.Info(
@@ -486,6 +561,7 @@ func (b *backend) defrag() error {
 		)
 	}
 	// gofail: var defragBeforeCopy struct{}
+	// 将db中的数据转移到tmpdb，这里会将填充比例设置为90%
 	err = defragdb(b.db, tmpdb, defragLimit)
 	if err != nil {
 		tmpdb.Close()
@@ -495,15 +571,18 @@ func (b *backend) defrag() error {
 		return err
 	}
 
+	// 关闭db文件
 	err = b.db.Close()
 	if err != nil {
 		b.lg.Fatal("failed to close database", zap.Error(err))
 	}
+	// 关闭临时db文件
 	err = tmpdb.Close()
 	if err != nil {
 		b.lg.Fatal("failed to close tmp database", zap.Error(err))
 	}
 	// gofail: var defragBeforeRename struct{}
+	// 将临时文件的文件名修改为正式的文件名，并覆盖原DB文件
 	err = os.Rename(tdbp, dbp)
 	if err != nil {
 		b.lg.Fatal("failed to rename tmp database", zap.Error(err))
@@ -515,15 +594,19 @@ func (b *backend) defrag() error {
 	}
 	defragmentedBoltOptions.Mlock = b.mlock
 
+	// 重新打开db文件
 	b.db, err = bolt.Open(dbp, 0600, &defragmentedBoltOptions)
 	if err != nil {
 		b.lg.Fatal("failed to open database", zap.String("path", dbp), zap.Error(err))
 	}
+	// 设置批量读写事务
 	b.batchTx.tx = b.unsafeBegin(true)
 
+	// 设置只读事务
 	b.readTx.reset()
 	b.readTx.tx = b.unsafeBegin(false)
 
+	// 修正分配空间和已使用空间
 	size := b.readTx.tx.Size()
 	db := b.readTx.tx.DB()
 	atomic.StoreInt64(&b.size, size)
@@ -551,40 +634,49 @@ func (b *backend) defrag() error {
 
 func defragdb(odb, tmpdb *bolt.DB, limit int) error {
 	// open a tx on tmpdb for writes
+	// 在临时文件上开启一个读写事务
 	tmptx, err := tmpdb.Begin(true)
 	if err != nil {
 		return err
 	}
 	defer func() {
 		if err != nil {
+			//出现错误则回滚
 			tmptx.Rollback()
 		}
 	}()
 
 	// open a tx on old db for read
+	// 在旧数据库上创建一个只读事务
 	tx, err := odb.Begin(false)
 	if err != nil {
 		return err
 	}
+	// 方法结束时关闭该只读事务
 	defer tx.Rollback()
 
+	// 获取只读事务的cursor，用于遍历bucket
 	c := tx.Cursor()
 
 	count := 0
+	// 遍历所有bucket
 	for next, _ := c.First(); next != nil; next, _ = c.Next() {
 		b := tx.Bucket(next)
 		if b == nil {
 			return fmt.Errorf("backend: cannot defrag bucket %s", string(next))
 		}
 
+		// 在新的数据库文件中创建对应的bucket
 		tmpb, berr := tmptx.CreateBucketIfNotExists(next)
 		if berr != nil {
 			return berr
 		}
+		// 设置填充比例为90%
 		tmpb.FillPercent = 0.9 // for bucket2seq write in for each
-
+		// 遍历当前bucket，并将bucket中的数据提交到新的文件中
 		if err = b.ForEach(func(k, v []byte) error {
 			count++
+			// 满足一次提交量，进行一次提交
 			if count > limit {
 				err = tmptx.Commit()
 				if err != nil {
@@ -599,16 +691,19 @@ func defragdb(odb, tmpdb *bolt.DB, limit int) error {
 
 				count = 0
 			}
+			// 将数据写入到读写事务中
 			return tmpb.Put(k, v)
 		}); err != nil {
 			return err
 		}
 	}
 
+	// 将读写事务中剩余的数据提交
 	return tmptx.Commit()
 }
 
 func (b *backend) begin(write bool) *bolt.Tx {
+	// 开启事务
 	b.mu.RLock()
 	tx := b.unsafeBegin(write)
 	b.mu.RUnlock()
@@ -616,15 +711,19 @@ func (b *backend) begin(write bool) *bolt.Tx {
 	size := tx.Size()
 	db := tx.DB()
 	stats := db.Stats()
+	// 更新总分配的空间大小
 	atomic.StoreInt64(&b.size, size)
+	// 更新已使用空间的大小
 	atomic.StoreInt64(&b.sizeInUse, size-(int64(stats.FreePageN)*int64(db.Info().PageSize)))
+	// 更新当前打开的读事务数量
+	// 也就是说，读写事务也算读事务
 	atomic.StoreInt64(&b.openReadTxN, int64(stats.OpenTxN))
-
+	// 返回事务实例
 	return tx
 }
 
 func (b *backend) unsafeBegin(write bool) *bolt.Tx {
-	tx, err := b.db.Begin(write)
+	tx, err := b.db.Begin(write) //调用boltDB的api来开启一个事务
 	if err != nil {
 		b.lg.Fatal("failed to begin tx", zap.Error(err))
 	}
