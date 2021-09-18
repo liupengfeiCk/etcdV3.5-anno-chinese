@@ -20,6 +20,9 @@ import (
 	"go.etcd.io/etcd/server/v3/lease"
 )
 
+// 实现了只读事务和读写事务的方法
+// 该实例相当于一个事务的代理
+// 其中会执行一些统计操作
 type metricsTxnWrite struct {
 	TxnWrite
 	ranges  uint

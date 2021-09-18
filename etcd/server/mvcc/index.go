@@ -24,7 +24,7 @@ import (
 
 // index索引，是对btree的一层封装
 type index interface {
-	// 查询指定key
+	// 查询指定key，其中ver为查询到的key的在atRev的当前版本号，在修改时会+1，删除时会置0
 	Get(key []byte, atRev int64) (rev, created revision, ver int64, err error)
 	// 范围查询
 	Range(key, end []byte, atRev int64) ([][]byte, []revision)
@@ -185,6 +185,8 @@ func (ti *treeIndex) Range(key, end []byte, atRev int64) (keys [][]byte, revs []
 	return keys, revs
 }
 
+// 为key创建一个墓碑
+// 该方法会嗲用keyIndex.tombstone
 func (ti *treeIndex) Tombstone(key []byte, rev revision) error {
 	keyi := &keyIndex{key: key}
 
@@ -205,11 +207,13 @@ func (ti *treeIndex) Tombstone(key []byte, rev revision) error {
 // 返回key到end区间满足main revision 大于 rev的revision信息
 // 其中返回的revision不是按照key的顺序排序的，而是按照revision.GreaterThan()
 func (ti *treeIndex) RangeSince(key, end []byte, rev int64) []revision {
+	// 创建对应的key实例
 	keyi := &keyIndex{key: key}
 
 	ti.RLock()
 	defer ti.RUnlock()
 
+	// 如果没有end，则只查询key的满足条件的revision
 	if end == nil {
 		item := ti.tree.Get(keyi)
 		if item == nil {
@@ -221,31 +225,38 @@ func (ti *treeIndex) RangeSince(key, end []byte, rev int64) []revision {
 
 	endi := &keyIndex{key: end}
 	var revs []revision
+	// 查询所有大于等于keyi的key实例，并执行传入的方法
 	ti.tree.AscendGreaterOrEqual(keyi, func(item btree.Item) bool {
+		// 在查询到的item不小于endi时停止
 		if len(endi.key) > 0 && !item.Less(endi) {
 			return false
 		}
+		// 添加revision
 		curKeyi := item.(*keyIndex)
 		revs = append(revs, curKeyi.since(ti.lg, rev)...)
 		return true
 	})
+	// 按照revision进行排序
 	sort.Sort(revisions(revs))
 
 	return revs
 }
 
+// 压缩btree
 func (ti *treeIndex) Compact(rev int64) map[revision]struct{} {
 	available := make(map[revision]struct{})
 	ti.lg.Info("compact tree index", zap.Int64("revision", rev))
+	// 克隆btree
 	ti.Lock()
 	clone := ti.tree.Clone()
 	ti.Unlock()
-
+	// 遍历btree的每个节点
 	clone.Ascend(func(item btree.Item) bool {
 		keyi := item.(*keyIndex)
 		//Lock is needed here to prevent modification to the keyIndex while
 		//compaction is going on or revision added to empty before deletion
 		ti.Lock()
+		// 压缩keyIndex
 		keyi.compact(ti.lg, rev, available)
 		if keyi.isEmpty() {
 			item := ti.tree.Delete(keyi)

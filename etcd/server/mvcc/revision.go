@@ -19,6 +19,10 @@ import "encoding/binary"
 // revBytesLen is the byte length of a normal revision.
 // First 8 bytes is the revision.main in big-endian format. The 9th byte
 // is a '_'. The last 8 bytes is the revision.sub in big-endian format.
+// 8 main revision
+// 1 _
+// 8 sub revision
+// 最终结果为如 1_1
 const revBytesLen = 8 + 1 + 8
 
 // A revision indicates modification of the key-value space.

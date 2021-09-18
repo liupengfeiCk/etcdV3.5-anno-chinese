@@ -48,11 +48,13 @@ var (
 // 将底层存储与上层解藕，并定义底层存储应该提供的接口
 type Backend interface {
 	// ReadTx returns a read transaction. It is replaced by ConcurrentReadTx in the main data path, see #10523.
-	// 创建一个只读事务
+	// 创建一个只读事务，直接获取的backend的只读事务
 	ReadTx() ReadTx
 	// 创建一个批量事务
 	BatchTx() BatchTx
 	// ConcurrentReadTx returns a non-blocking read transaction.
+	// 创建一个并发读取的只读事务，会阻塞写入
+	// 之所以会阻塞写入，是因为在创建该只读事务时需要复制只读缓存，而当写入时会向只读缓存中更新，从而导致阻塞了写入
 	ConcurrentReadTx() ReadTx
 
 	// 创建快照
@@ -285,10 +287,12 @@ func (b *backend) ReadTx() ReadTx { return b.readTx }
 // ConcurrentReadTx creates and returns a new ReadTx, which:
 // A) creates and keeps a copy of backend.readTx.txReadBuffer,
 // B) references the boltdb read Tx (and its bucket cache) of current batch interval.
+// 创建并发读取事务
 func (b *backend) ConcurrentReadTx() ReadTx {
 	b.readTx.RLock()
 	defer b.readTx.RUnlock()
 	// prevent boltdb read Tx from been rolled back until store read Tx is done. Needs to be called when holding readTx.RLock().
+	// 闭锁值+1
 	b.readTx.txWg.Add(1)
 
 	// TODO: might want to copy the read buffer lazily - create copy when A) end of a write transaction B) end of a batch interval.
@@ -314,22 +318,26 @@ func (b *backend) ConcurrentReadTx() ReadTx {
 
 	var buf *txReadBuffer
 	switch {
-	case isEmptyCache:
+	case isEmptyCache: // 如果事务读缓存为空
 		// perform safe copy of buffer while holding "b.txReadBufferCache.mu.Lock"
 		// this is only supposed to run once so there won't be much overhead
+		// 则从backend的读事务缓存中拷贝
+		// 它只会被运行一次，所以就没有解锁，如果解锁会导致被运行多次
 		curBuf := b.readTx.buf.unsafeCopy()
 		buf = &curBuf
-	case isStaleCache:
+	case isStaleCache: // 如果是过时的缓存
 		// to maximize the concurrency, try unsafe copy of buffer
 		// release the lock while copying buffer -- cache may become stale again and
 		// get overwritten by someone else.
 		// therefore, we need to check the readTx buffer version again
+		// 为了达到最大并发性能，在复制缓存时将锁取消
 		b.txReadBufferCache.mu.Unlock()
 		curBuf := b.readTx.buf.unsafeCopy()
 		b.txReadBufferCache.mu.Lock()
 		buf = &curBuf
 	default:
 		// neither empty nor stale cache, just use the current buffer
+		// 缓存没过期，直接使用
 		buf = curCache
 	}
 	// txReadBufferCache.bufVersion can be modified when we doing an unsafeCopy()
@@ -340,6 +348,9 @@ func (b *backend) ConcurrentReadTx() ReadTx {
 	// It is safe to not update "txReadBufferCache.buf", because the next following
 	// "ConcurrentReadTx" creation will trigger a new "readTx.baseReadTx.buf" copy
 	// and "buf" is still used for the current "concurrentReadTx.baseReadTx.buf".
+	// isEmptyCache的正确性来自于之前在复制时并没有去掉锁，所以这次对isEmptyCache的判断一定是有效的
+	// curCacheVer == b.txReadBufferCache.bufVersion 用于判断当前缓存是否已经被更新，如果已经被更新，则等式不成立
+	// 满足条件将跳过更新操作
 	if isEmptyCache || curCacheVer == b.txReadBufferCache.bufVersion {
 		// continue if the cache is never set or no one has modified the cache
 		b.txReadBufferCache.buf = buf
@@ -349,6 +360,7 @@ func (b *backend) ConcurrentReadTx() ReadTx {
 	b.txReadBufferCache.mu.Unlock()
 
 	// concurrentReadTx is not supposed to write to its txReadBuffer
+	// 创建一个并发只读事务
 	return &concurrentReadTx{
 		baseReadTx: baseReadTx{
 			buf:     *buf,

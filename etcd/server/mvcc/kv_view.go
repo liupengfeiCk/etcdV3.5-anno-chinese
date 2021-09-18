@@ -21,6 +21,9 @@ import (
 	"go.etcd.io/etcd/server/v3/lease"
 )
 
+// ReadView 实现
+// 相当于KV的一个只读视图
+// 这也是被叫做readView的原因
 type readView struct{ kv KV }
 
 func (rv *readView) FirstRev() int64 {
@@ -41,6 +44,9 @@ func (rv *readView) Range(ctx context.Context, key, end []byte, ro RangeOptions)
 	return tr.Range(ctx, key, end, ro)
 }
 
+// WriteView 实现
+// 相当于KV的一个读写视图
+// WriteView名字的由来
 type writeView struct{ kv KV }
 
 func (wv *writeView) DeleteRange(key, end []byte) (n, rev int64) {

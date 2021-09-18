@@ -240,6 +240,7 @@ func (ki *keyIndex) since(lg *zap.Logger, rev int64) []revision {
 // If a generation becomes empty during compaction, it will be removed.
 // 对keyIndex进行压缩，会删除小于等于给定rev的revision
 // 当generation为空时，将被删除
+// available 表示临界点的revision，该revision为被压缩的最后一个revision
 func (ki *keyIndex) compact(lg *zap.Logger, atRev int64, available map[revision]struct{}) {
 	if ki.isEmpty() {
 		lg.Panic(
@@ -260,7 +261,7 @@ func (ki *keyIndex) compact(lg *zap.Logger, atRev int64, available map[revision]
 			g.revs = g.revs[revIndex:]
 		}
 		// remove any tombstone
-		// 删除只包含墓碑的generation
+		// 删除墓碑
 		if len(g.revs) == 1 && genIdx != len(ki.generations)-1 {
 			delete(available, g.revs[0])
 			genIdx++
@@ -310,6 +311,7 @@ func (ki *keyIndex) doCompact(atRev int64, available map[revision]struct{}) (gen
 		g = &ki.generations[genIdx]
 	}
 
+	// 逆序查找到revIndex
 	revIndex = g.walk(f)
 
 	return genIdx, revIndex
@@ -382,7 +384,7 @@ func (ki *keyIndex) String() string {
 
 // generation contains multiple revisions of a key.
 type generation struct {
-	// 记录当前generation所包含的修改次数，即revs的长度
+	// 记录当前generation所包含的修改次数
 	ver int64
 	// 记录创建当前generation实例时的revision
 	created revision // when the generation is created (put in first revision).
