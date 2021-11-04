@@ -28,6 +28,7 @@ import (
 	"go.uber.org/zap"
 )
 
+// 创建backend存储
 func newBackend(cfg config.ServerConfig, hooks backend.Hooks) backend.Backend {
 	bcfg := backend.DefaultBackendConfig()
 	bcfg.Path = cfg.BackendPath()
@@ -57,13 +58,16 @@ func newBackend(cfg config.ServerConfig, hooks backend.Hooks) backend.Backend {
 
 // openSnapshotBackend renames a snapshot db to the current etcd db and opens it.
 func openSnapshotBackend(cfg config.ServerConfig, ss *snap.Snapshotter, snapshot raftpb.Snapshot, hooks backend.Hooks) (backend.Backend, error) {
+	// 根据快照元数据查找指定的blotDB文件
 	snapPath, err := ss.DBFilePath(snapshot.Metadata.Index)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find database snapshot file (%v)", err)
 	}
+	// 将可用的DB文件移动到指定目录中
 	if err := os.Rename(snapPath, cfg.BackendPath()); err != nil {
 		return nil, fmt.Errorf("failed to rename database snapshot file (%v)", err)
 	}
+	// 新建backend实例
 	return openBackend(cfg, hooks), nil
 }
 
@@ -72,10 +76,12 @@ func openBackend(cfg config.ServerConfig, hooks backend.Hooks) backend.Backend {
 	fn := cfg.BackendPath()
 
 	now, beOpened := time.Now(), make(chan backend.Backend)
+	//
 	go func() {
 		beOpened <- newBackend(cfg, hooks)
 	}()
 
+	// 等待10s来用于backend的创建
 	select {
 	case be := <-beOpened:
 		cfg.Logger.Info("opened backend db", zap.String("path", fn), zap.Duration("took", time.Since(now)))
@@ -98,12 +104,16 @@ func openBackend(cfg config.ServerConfig, hooks backend.Hooks) backend.Backend {
 // case, replace the db with the snapshot db sent by the leader.
 func recoverSnapshotBackend(cfg config.ServerConfig, oldbe backend.Backend, snapshot raftpb.Snapshot, beExist bool, hooks backend.Hooks) (backend.Backend, error) {
 	consistentIndex := uint64(0)
+	// 快照文件存在，则查询快照文件的consistentIndex
 	if beExist {
 		consistentIndex, _ = cindex.ReadConsistentIndex(oldbe.BatchTx())
 	}
+	// 如果快照的index小于cnsistentIndex，则还是使用当前backend
 	if snapshot.Metadata.Index <= consistentIndex {
 		return oldbe, nil
 	}
+	// 否则关闭当前backend
 	oldbe.Close()
+	// 使用快照文件生成backend
 	return openSnapshotBackend(cfg, snap.New(cfg.Logger, cfg.SnapDir()), snapshot, hooks)
 }

@@ -44,6 +44,7 @@ type ServerConfig struct {
 	// rather than the dataDir/member/wal.
 	DedicatedWALDir string
 
+	// 当前etcdServer每应用多少条entry进行一次快照生成操作
 	SnapshotCount uint64
 
 	// SnapshotCatchUpEntries is the number of entries for a slow follower
@@ -52,19 +53,27 @@ type ServerConfig struct {
 	// The max throughput is around 10K. Keep a 5K entries is enough for helping
 	// follower to catch up.
 	// WARNING: only change this for tests. Always use "DefaultSnapshotCatchUpEntries"
+	// 快照追赶条目，默认值为5000
+	// 保持在5000可以保证毫秒级的追赶
 	SnapshotCatchUpEntries uint64
 
+	// 最大快照文件数
 	MaxSnapFiles uint
-	MaxWALFiles  uint
+	// 最大wal日志数
+	MaxWALFiles uint
 
 	// BackendBatchInterval is the maximum time before commit the backend transaction.
+	// backend一次事务的最大操作时间
 	BackendBatchInterval time.Duration
 	// BackendBatchLimit is the maximum operations before commit the backend transaction.
+	// backend一次事务的最大操作数
 	BackendBatchLimit int
 
 	// BackendFreelistType is the type of the backend boltdb freelist.
+	// 后端boltDB的空闲列表的类型
 	BackendFreelistType bolt.FreelistType
 
+	// 封装了集群中每个节点的名称与其对应的URL
 	InitialPeerURLsMap  types.URLsMap
 	InitialClusterToken string
 	NewCluster          bool
@@ -77,7 +86,8 @@ type ServerConfig struct {
 	// whose Host header value exists in this white list.
 	HostWhitelist map[string]struct{}
 
-	TickMs        uint
+	TickMs uint
+	// 用于初始化raft.electionTimeout
 	ElectionTicks int
 
 	// InitialElectionTickAdvance is true, then local member fast-forwards
@@ -114,8 +124,9 @@ type ServerConfig struct {
 	AutoCompactionRetention time.Duration
 	AutoCompactionMode      string
 	CompactionBatchLimit    int
-	QuotaBackendBytes       int64
-	MaxTxnOps               uint
+	// backend空闲配额的大小
+	QuotaBackendBytes int64
+	MaxTxnOps         uint
 
 	// MaxRequestBytes is the maximum request size to send over raft.
 	MaxRequestBytes uint
@@ -137,6 +148,7 @@ type ServerConfig struct {
 	CorruptCheckTime    time.Duration
 
 	// PreVote is true to enable Raft Pre-Vote.
+	// 是否开启预选举
 	PreVote bool
 
 	// SocketOpts are socket options passed to listener config.
@@ -163,6 +175,7 @@ type ServerConfig struct {
 
 	// UnsafeNoFsync disables all uses of fsync.
 	// Setting this is unsafe and will cause data loss.
+	// 是否不让backend同步刷盘，开启后可能存在数据丢失
 	UnsafeNoFsync bool `json:"unsafe-no-fsync"`
 
 	DowngradeCheckTime time.Duration
@@ -173,6 +186,7 @@ type ServerConfig struct {
 	//   - disk latency might be unstable
 	// Currently all etcd memory gets mlocked, but in future the flag can
 	// be refined to mlock in-use area of bbolt only.
+	// 是否在内存中锁定etcd内存页
 	ExperimentalMemoryMlock bool `json:"experimental-memory-mlock"`
 
 	// ExperimentalTxnModeWriteWithSharedBuffer enable write transaction to use

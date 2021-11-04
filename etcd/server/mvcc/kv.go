@@ -175,6 +175,7 @@ type WatchableKV interface {
 }
 
 // Watchable is the interface that wraps the NewWatchStream function.
+// 该接口用于获取WatchStream
 type Watchable interface {
 	// NewWatchStream returns a WatchStream that can be used to
 	// watch events happened or happening on the KV.

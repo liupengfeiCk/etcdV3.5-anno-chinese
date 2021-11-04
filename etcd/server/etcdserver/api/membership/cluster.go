@@ -47,19 +47,28 @@ const maxLearners = 1
 type RaftCluster struct {
 	lg *zap.Logger
 
+	// 本地id
 	localID types.ID
-	cid     types.ID
+	// 集群id
+	cid types.ID
 
+	// 用来持久化节点信息的v2存储
 	v2store v2store.Store
-	be      backend.Backend
+	// 用来持久化节点信息的v3存储
+	be backend.Backend
 
 	sync.Mutex // guards the fields below
-	version    *semver.Version
-	members    map[types.ID]*Member
+	// 版本，什么版本目前不清楚
+	version *semver.Version
+	// 记录了集群成员id与其Member的映射
+	// 其中Member记录了暴露给其他节点的url地址和与客户端交互的url地址
+	members map[types.ID]*Member
 	// removed contains the ids of removed members in the cluster.
 	// removed id cannot be reused.
+	// 从当前集群中移除的节点id，在后续添加新节点时，这些id不能被使用
 	removed map[types.ID]bool
 
+	// 集群降级相关内容
 	downgradeInfo *DowngradeInfo
 }
 
@@ -82,18 +91,19 @@ const (
 // NewClusterFromURLsMap creates a new raft cluster using provided urls map. Currently, it does not support creating
 // cluster with raft learner member.
 func NewClusterFromURLsMap(lg *zap.Logger, token string, urlsmap types.URLsMap) (*RaftCluster, error) {
-	c := NewCluster(lg)
+	c := NewCluster(lg) // 创建集群实例
+	// 为集群实例添加member
 	for name, urls := range urlsmap {
 		m := NewMember(name, urls, token, nil)
-		if _, ok := c.members[m.ID]; ok {
+		if _, ok := c.members[m.ID]; ok { // 如果member重复，报错
 			return nil, fmt.Errorf("member exists with identical ID %v", m)
 		}
-		if uint64(m.ID) == raft.None {
+		if uint64(m.ID) == raft.None { // 如果member存在未分配id的，报错
 			return nil, fmt.Errorf("cannot use %x as member id", raft.None)
 		}
 		c.members[m.ID] = m
 	}
-	c.genID()
+	c.genID() //通过所有节点的id，为集群生成一个id
 	return c, nil
 }
 
@@ -753,8 +763,10 @@ func downgradeInfoFromBackend(lg *zap.Logger, be backend.Backend) *DowngradeInfo
 // from the existing cluster to the local cluster.
 // If the validation fails, an error will be returned.
 func ValidateClusterAndAssignIDs(lg *zap.Logger, local *RaftCluster, existing *RaftCluster) error {
+	// 获取本地和远端的member实例副本
 	ems := existing.Members()
 	lms := local.Members()
+	// 数量不相同，报错并返回
 	if len(ems) != len(lms) {
 		return fmt.Errorf("member count is unequal")
 	}
@@ -765,16 +777,19 @@ func ValidateClusterAndAssignIDs(lg *zap.Logger, local *RaftCluster, existing *R
 		var err error
 		ok := false
 		for j := range lms {
+			// 比较远端和本地的对应member的url是否相等
 			if ok, err = netutil.URLStringsEqual(ctx, lg, ems[i].PeerURLs, lms[j].PeerURLs); ok {
-				lms[j].ID = ems[i].ID
+				lms[j].ID = ems[i].ID //将本地的对应节点id修改为远端的节点id
 				break
 			}
 		}
+		// 如果没有相等的url，节点不匹配，报错
 		if !ok {
 			return fmt.Errorf("PeerURLs: no match found for existing member (%v, %v), last resolver error (%v)", ems[i].ID, ems[i].PeerURLs, err)
 		}
 	}
 	local.members = make(map[types.ID]*Member)
+	// 重新装入members
 	for _, m := range lms {
 		local.members[m.ID] = m
 	}

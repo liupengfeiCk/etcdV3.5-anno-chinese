@@ -157,18 +157,22 @@ type Server interface {
 	// AddMember attempts to add a member into the cluster. It will return
 	// ErrIDRemoved if member ID is removed from the cluster, or return
 	// ErrIDExists if member ID exists in the cluster.
+	// 添加成员到集群中
 	AddMember(ctx context.Context, memb membership.Member) ([]*membership.Member, error)
 	// RemoveMember attempts to remove a member from the cluster. It will
 	// return ErrIDRemoved if member ID is removed from the cluster, or return
 	// ErrIDNotFound if member ID is not in the cluster.
+	// 删除集群中的成员
 	RemoveMember(ctx context.Context, id uint64) ([]*membership.Member, error)
 	// UpdateMember attempts to update an existing member in the cluster. It will
 	// return ErrIDNotFound if the member ID does not exist.
+	// 更新集群中的成员
 	UpdateMember(ctx context.Context, updateMemb membership.Member) ([]*membership.Member, error)
 	// PromoteMember attempts to promote a non-voting node to a voting node. It will
 	// return ErrIDNotFound if the member ID does not exist.
 	// return ErrLearnerNotReady if the member are not ready.
 	// return ErrMemberNotLearner if the member is not a learner.
+	// 将非投票成员提升为投票成员
 	PromoteMember(ctx context.Context, id uint64) ([]*membership.Member, error)
 
 	// ClusterVersion is the cluster-wide minimum major.minor version.
@@ -185,8 +189,11 @@ type Server interface {
 	// NOTE: ClusterVersion might be nil when etcd 2.1 works with etcd 2.0 and
 	// the leader is etcd 2.0. etcd 2.0 leader will not update clusterVersion since
 	// this feature is introduced post 2.0.
+	// 返回集群的etcd版本
 	ClusterVersion() *semver.Version
+	// 返回集群
 	Cluster() api.Cluster
+	// 引发警报的成员集合
 	Alarms() []*pb.AlarmMember
 
 	// LeaderChangedNotify returns a channel for application level code to be notified
@@ -196,102 +203,153 @@ type Server interface {
 	// 1. the returned channel is being closed when the leadership changes.
 	// 2. so the new channel needs to be obtained for each raft term.
 	// 3. user can loose some consecutive channel changes using this API.
+	// 返回一个代码级的leader变更通知，适用于内嵌在etcd中的应用程序
 	LeaderChangedNotify() <-chan struct{}
 }
 
 // EtcdServer is the production implementation of the Server interface
 type EtcdServer struct {
 	// inflightSnapshots holds count the number of snapshots currently inflight.
-	inflightSnapshots int64  // must use atomic operations to access; keep 64-bit aligned.
-	appliedIndex      uint64 // must use atomic operations to access; keep 64-bit aligned.
-	committedIndex    uint64 // must use atomic operations to access; keep 64-bit aligned.
-	term              uint64 // must use atomic operations to access; keep 64-bit aligned.
-	lead              uint64 // must use atomic operations to access; keep 64-bit aligned.
+	// 当前已发送但未收到响应的快照数量
+	inflightSnapshots int64 // must use atomic operations to access; keep 64-bit aligned.
+	// 已应用的位置
+	appliedIndex uint64 // must use atomic operations to access; keep 64-bit aligned.
+	// 已提交的位置
+	committedIndex uint64 // must use atomic operations to access; keep 64-bit aligned.
+	// 当前任期
+	term uint64 // must use atomic operations to access; keep 64-bit aligned.
+	// leader的id
+	lead uint64 // must use atomic operations to access; keep 64-bit aligned.
 
+	// 在进行事务提交时，会将当前的consistentIndex与term传递到事务中，以保证这次提交的顺序和唯一性
+	// 该实例用于对consistentIndex 的 get/set/save
 	consistIndex cindex.ConsistentIndexer // consistIndex is used to get/set/save consistentIndex
-	r            raftNode                 // uses 64-bit atomics; keep 64-bit aligned.
+	// 与底层etcd-raft模块通讯的桥梁
+	r raftNode // uses 64-bit atomics; keep 64-bit aligned.
 
+	// 当前节点将自身信息推送到其他节点后会将该通道关闭
+	// 作为etcdServer实例对外提供服务的一个信号
 	readych chan struct{}
-	Cfg     config.ServerConfig
+	// 封装了配置信息
+	Cfg config.ServerConfig
 
 	lgMu *sync.RWMutex
 	lg   *zap.Logger
 
+	// 主要负责协调多个后台线程之间的执行
 	w wait.Wait
 
 	readMu sync.RWMutex
 	// read routine notifies etcd server that it waits for reading by sending an empty struct to
 	// readwaitC
+	// 读取例程通过该通道通知etcdServer它正在等待读取
 	readwaitc chan struct{}
 	// readNotifier is used to notify the read routine that it can process the request
 	// when there is no error
+	// 用于通知读取例程在没有错误时可以处理请求
 	readNotifier *notifier
 
 	// stop signals the run goroutine should shutdown.
+	// 通知run协程关闭
 	stop chan struct{}
 	// stopping is closed by run goroutine on shutdown.
+	// 在run协程关闭时被关闭，用于通知其他协程
 	stopping chan struct{}
 	// done is closed when all goroutines from start() complete.
+	// 当所有协程被关闭时，该通道关闭
 	done chan struct{}
 	// leaderChanged is used to notify the linearizable read loop to drop the old read requests.
+	// 通知读取循环丢弃旧的请求
+	// 因为发生了leader Change导致
 	leaderChanged   chan struct{}
 	leaderChangedMu sync.RWMutex
 
-	errorc     chan error
-	id         types.ID
+	errorc chan error
+	// 记录当前节点的id
+	id types.ID
+	// 记录当前节点的名称和接收集群中其他节点的请求的url地址
 	attributes membership.Attributes
 
+	// 记录当前集群中全部节点的信息
 	cluster *membership.RaftCluster
 
-	v2store     v2store.Store
+	// v2版本的存储
+	v2store v2store.Store
+	// 读写快照文件的管理器
 	snapshotter *snap.Snapshotter
 
+	// 应用v2版本的entry记录，其底层封装了v2版本的存储
 	applyV2 ApplierV2
 
 	// applyV3 is the applier with auth and quotas
+	// 应用v3版本的entry记录，其底层封装了v3版本的存储
+	// 有身份验证和quotas
 	applyV3 applierV3
 	// applyV3Base is the core applier without auth or quotas
+	// 应用v3版本的entry记录
+	// 没有身份验证和quotas
 	applyV3Base applierV3
 	// applyV3Internal is the applier for internal request
+	// 是内部请求的应用
 	applyV3Internal applierV3Internal
-	applyWait       wait.WaitTime
+	// 负责协调后台多个线程之间的执行
+	// 但是WaitTime中id是有序的
+	applyWait wait.WaitTime
 
-	kv         mvcc.WatchableKV
-	lessor     lease.Lessor
-	bemu       sync.Mutex
-	be         backend.Backend
-	beHooks    *backendHooks
-	authStore  auth.AuthStore
+	// v3版本的存储，包装了watch机制
+	kv mvcc.WatchableKV
+	// 租约管理
+	lessor lease.Lessor
+	bemu   sync.Mutex
+	// v3版本的后端存储
+	be backend.Backend
+	// 后端存储的钩子函数
+	beHooks *backendHooks
+	// 在be之上的一层封装，用于记录权限控制相关的信息
+	authStore auth.AuthStore
+	// be之上的一层封装，用于记录报警相关的信息
 	alarmStore *v3alarm.AlarmStore
 
-	stats  *stats.ServerStats
+	// 当前节点的服务状态
+	stats *stats.ServerStats
+	// 当前节点的leader的状态
 	lstats *stats.LeaderStats
 
+	// 用来控制leader节点定期发送sync消息的频率
 	SyncTicker *time.Ticker
 	// compactor is used to auto-compact the KV.
+	// 用于控制定期压缩的频率
+	// leader节点会对存储进行定期压缩
 	compactor v3compactor.Compactor
 
 	// peerRt used to send requests (version, lease) to peers.
-	peerRt   http.RoundTripper
+	peerRt http.RoundTripper
+	// 用于生成请求的唯一标识
 	reqIDGen *idutil.Generator
 
 	// wgMu blocks concurrent waitgroup mutation while server stopping
 	wgMu sync.RWMutex
 	// wg is used to wait for the goroutines that depends on the server state
 	// to exit when stopping the server.
+	// 在stop中会通过该字段等待所有协程关闭
 	wg sync.WaitGroup
 
 	// ctx is used for etcd-initiated requests that may need to be canceled
 	// on etcd server shutdown.
-	ctx    context.Context
+	// 用于发起请求，这些请求可能会在etcd被关闭时取消
+	ctx context.Context
+	// ctx的取消回调
 	cancel context.CancelFunc
 
-	leadTimeMu      sync.RWMutex
+	leadTimeMu sync.RWMutex
+	// 记录当前节点最近一次被转换为leader的时间戳
 	leadElectedTime time.Time
 
 	firstCommitInTermMu sync.RWMutex
-	firstCommitInTermC  chan struct{}
+	// 传递第一次提交的任期（不确定）
+	firstCommitInTermC chan struct{}
 
+	// 控制etcd服务器的http请求的控制器
 	*AccessController
 }
 
@@ -328,14 +386,16 @@ func (bh *backendHooks) SetConfState(confState *raftpb.ConfState) {
 // NewServer creates a new EtcdServer from the supplied configuration. The
 // configuration is considered static for the lifetime of the EtcdServer.
 func NewServer(cfg config.ServerConfig) (srv *EtcdServer, err error) {
-	st := v2store.New(StoreClusterPrefix, StoreKeysPrefix) //创建一个存储结构，其中/0目录为存储集群，/1目录存储key
+	// 创建一个v2版本的后端存储，其中/0目录为存储集群，/1目录存储key
+	st := v2store.New(StoreClusterPrefix, StoreKeysPrefix)
 
+	// 定义初始化过程中使用的变量
 	var (
-		w  *wal.WAL
-		n  raft.Node
-		s  *raft.MemoryStorage
-		id types.ID
-		cl *membership.RaftCluster
+		w  *wal.WAL                // 用于管理wal日志文件的wal实例
+		n  raft.Node               // etcd-raft模块中的node
+		s  *raft.MemoryStorage     // 内存存储实例
+		id types.ID                // 记录当前节点的id
+		cl *membership.RaftCluster // 当前集群中所有成员的信息
 	)
 
 	if cfg.MaxRequestBytes > recommendedMaxRequestBytes { //如果配置中raft请求的发送大小大于理论上最优的最大值，则发出警告
@@ -348,13 +408,16 @@ func NewServer(cfg config.ServerConfig) (srv *EtcdServer, err error) {
 		)
 	}
 
+	// 每个节点都会将其数据保存到"节点名称.etcd/member"目录下
+	// 检测该目录是否存在，如果不存在就创建
 	if terr := fileutil.TouchDirAll(cfg.DataDir); terr != nil { //创建数据目录
 		return nil, fmt.Errorf("cannot access data directory: %v", terr)
 	}
 
 	haveWAL := wal.Exist(cfg.WALDir()) //检查WAL(顺序日志)文件夹内是否有内容
 
-	if err = fileutil.TouchDirAll(cfg.SnapDir()); err != nil { //创建快照目录
+	// 检测快照目录是否存在，不存在则创建
+	if err = fileutil.TouchDirAll(cfg.SnapDir()); err != nil {
 		cfg.Logger.Fatal(
 			"failed to create snapshot directory",
 			zap.String("path", cfg.SnapDir()),
@@ -372,16 +435,17 @@ func NewServer(cfg config.ServerConfig) (srv *EtcdServer, err error) {
 		)
 	}
 
-	ss := snap.New(cfg.Logger, cfg.SnapDir()) //创建一个快照文件夹的实例，里面包含日志
+	// 创建Snapshotter实例，用来读写snap目录下的文件
+	ss := snap.New(cfg.Logger, cfg.SnapDir())
 
 	bepath := cfg.BackendPath()       //获取db文件夹路径
 	beExist := fileutil.Exist(bepath) //判断db文件夹是否有文件
 
-	ci := cindex.NewConsistentIndex(nil)                  //创建一致索引
+	ci := cindex.NewConsistentIndex(nil)                  //创建consistentIndex管理器
 	beHooks := &backendHooks{lg: cfg.Logger, indexer: ci} //创建钩子
-	be := openBackend(cfg, beHooks)                       //打开backend，backend是啥
-	ci.SetBackend(be)                                     //为一致索引设置backend
-	cindex.CreateMetaBucket(be.BatchTx())                 //创建元数据桶
+	be := openBackend(cfg, beHooks)                       //打开backend
+	ci.SetBackend(be)                                     //为consistentIndex管理器设置backend
+	cindex.CreateMetaBucket(be.BatchTx())                 //在blotDB中创建元数据bucket,如果它不存在
 
 	if cfg.ExperimentalBootstrapDefragThresholdMegabytes != 0 { //如果碎片整理配置不等于0，则设置该配置
 		err := maybeDefragBackend(cfg, be) //当剩余空间小于设置值，则跳过，为啥小于才跳过，不是应该大于才跳过吗？
@@ -396,6 +460,7 @@ func NewServer(cfg config.ServerConfig) (srv *EtcdServer, err error) {
 		}
 	}()
 
+	// 根据配置创建RoundTripper实例，主要负责实现网络请求相关内容
 	prt, err := rafthttp.NewRoundTripper(cfg.PeerTLSInfo, cfg.PeerDialTimeout()) //为raft设置用tls生成的传输行为和设置拨号时间
 	if err != nil {
 		return nil, err
@@ -406,42 +471,57 @@ func NewServer(cfg config.ServerConfig) (srv *EtcdServer, err error) {
 	)
 
 	switch {
-	case !haveWAL && !cfg.NewCluster: //如果日志为空且不为新创建的集群，则让成员加入当前集群配置
+	// 在添加节点时，leader会为这个要添加的节点创建对应的member
+	// 所以需要从远端获取这个本地节点的member的id作为其本地id
+	// 又因为是从现有的集群新增，则本地日志应该为空，所有日志都应该从集群中来
+	// 这也导致了在本地节点启动时，实际上是走的恢复流程
+	// 即下面startNode中ids的参数为空
+	// 因为不需要自己创建peer再写入到日志文件中，所有的日志信息都从集群中来，自然也包括peer
+	case !haveWAL && !cfg.NewCluster: //如果日志为空且不为新创建的集群，说明该节点加入现有集群
 		if err = cfg.VerifyJoinExisting(); err != nil { //检查该配置是否符合现存集群
 			return nil, err
 		}
-		cl, err = membership.NewClusterFromURLsMap(cfg.Logger, cfg.InitialClusterToken, cfg.InitialPeerURLsMap) //创建集群
+		// 根据配置，创建RaftCluster实例和其中的Member实例
+		cl, err = membership.NewClusterFromURLsMap(cfg.Logger, cfg.InitialClusterToken, cfg.InitialPeerURLsMap)
 		if err != nil {
 			return nil, err
 		}
-		existingCluster, gerr := GetClusterFromRemotePeers(cfg.Logger, getRemotePeerURLs(cl, cfg.Name), prt) //通过对等url去获取集群元数据
+		// getRemotePeerURLs（）过滤当前节点的信息，排序集群中其他节点暴露的url地址并返回
+		// GetClusterFromRemotePeers（） 从集群中其他节点请求信息并创建相应的raftCluster
+		existingCluster, gerr := GetClusterFromRemotePeers(cfg.Logger, getRemotePeerURLs(cl, cfg.Name), prt)
 		if gerr != nil {
 			return nil, fmt.Errorf("cannot fetch cluster info from peer urls: %v", gerr)
 		}
-		if err = membership.ValidateClusterAndAssignIDs(cfg.Logger, cl, existingCluster); err != nil { //通过获取的集群成员信息来验证本地集群配置
+		// 通过上面方法获取的集群成员信息来验证本地集群配置，并用远端的节点id重新分配member
+		if err = membership.ValidateClusterAndAssignIDs(cfg.Logger, cl, existingCluster); err != nil {
 			return nil, fmt.Errorf("error validating peerURLs %s: %v", existingCluster, err)
 		}
-		if !isCompatibleWithCluster(cfg.Logger, cl, cl.MemberByName(cfg.Name).ID, prt) { //这个不懂，兼容版本的这个版本是啥？
+		// 检测当前集群版本与当前节点的版本是否兼容
+		if !isCompatibleWithCluster(cfg.Logger, cl, cl.MemberByName(cfg.Name).ID, prt) {
 			return nil, fmt.Errorf("incompatible with current running cluster")
 		}
 
 		remotes = existingCluster.Members()         //从集群元数据中获取成员集合
-		cl.SetID(types.ID(0), existingCluster.ID()) //向成员数据中设置成员id和集群id，为啥设置为0？
-		cl.SetStore(st)                             //设置储存实例
-		cl.SetBackend(be)                           //设置backend
-		id, n, s, w = startNode(cfg, cl, nil)       //创建raft节点
+		cl.SetID(types.ID(0), existingCluster.ID()) //向成员数据中设置成员id和集群id，为啥设置为0？为0表示未分配id
+		cl.SetStore(st)                             //设置v2存储实例
+		cl.SetBackend(be)                           //设置v3的backend
+		id, n, s, w = startNode(cfg, cl, nil)       //创建并恢复etcd-raft的node节点
 		cl.SetID(id, existingCluster.ID())          //用上面返回的id重新设置id
 
-	case !haveWAL && cfg.NewCluster: //如果wal文件为空，且为新创建集群
+	case !haveWAL && cfg.NewCluster: //如果wal文件为空，且为新创建集群，这出现在集群第一次启动的情况下
+		// 对当前节点启动所使用的配置进行一系列检查
 		if err = cfg.VerifyBootstrap(); err != nil { //检查配置，主要确认是否是集群成员、对等url是否正确、初始化对等url是否重复
 			return nil, err
 		}
-		cl, err = membership.NewClusterFromURLsMap(cfg.Logger, cfg.InitialClusterToken, cfg.InitialPeerURLsMap) //创建集群
+		// 根据配置，创建RaftCluster实例和其中的Member实例
+		cl, err = membership.NewClusterFromURLsMap(cfg.Logger, cfg.InitialClusterToken, cfg.InitialPeerURLsMap)
 		if err != nil {
 			return nil, err
 		}
-		m := cl.MemberByName(cfg.Name)                                                            //获取集群中的该成员
-		if isMemberBootstrapped(cfg.Logger, cl, cfg.Name, prt, cfg.BootstrapTimeoutEffective()) { //检查该成员是否已经启动
+		// 根据当前配置中的名称获取当前实例的member
+		m := cl.MemberByName(cfg.Name)
+		// 从集群中其他节点检查是否有与该节点相同名字的节点已经启动
+		if isMemberBootstrapped(cfg.Logger, cl, cfg.Name, prt, cfg.BootstrapTimeoutEffective()) {
 			return nil, fmt.Errorf("member %s has already been bootstrapped", m.ID)
 		}
 		if cfg.ShouldDiscover() { //如果采用公共集群发现服务
@@ -496,11 +576,14 @@ func NewServer(cfg config.ServerConfig) (srv *EtcdServer, err error) {
 		}
 
 		if snapshot != nil {
-			if err = st.Recovery(snapshot.Data); err != nil { //用快照恢复存储结构
+			if err = st.Recovery(snapshot.Data); err != nil { //用快照恢复v2存储结构
 				cfg.Logger.Panic("failed to recover from snapshot", zap.Error(err))
 			}
 
-			if err = assertNoV2StoreContent(cfg.Logger, st, cfg.V2Deprecation); err != nil { //检查没有v2的内容
+			// 检查v2是否只有元数据
+			// 如果不是只有元数据且状态在V2_DEPR_1_WRITE_ONLY的等级之上（包括），则报错
+			// 因为在这些等级中不允许v2中存在实际数据
+			if err = assertNoV2StoreContent(cfg.Logger, st, cfg.V2Deprecation); err != nil {
 				cfg.Logger.Error("illegal v2store content", zap.Error(err))
 				return nil, err
 			}
@@ -511,7 +594,8 @@ func NewServer(cfg config.ServerConfig) (srv *EtcdServer, err error) {
 				zap.String("snapshot-size", humanize.Bytes(uint64(snapshot.Size()))),
 			)
 
-			if be, err = recoverSnapshotBackend(cfg, be, *snapshot, beExist, beHooks); err != nil { //恢复backend
+			// 使用快照恢复v3的backend
+			if be, err = recoverSnapshotBackend(cfg, be, *snapshot, beExist, beHooks); err != nil {
 				cfg.Logger.Panic("failed to recover v3 backend from snapshot", zap.Error(err))
 			}
 			s1, s2 := be.Size(), be.SizeInUse()
@@ -529,13 +613,14 @@ func NewServer(cfg config.ServerConfig) (srv *EtcdServer, err error) {
 		if !cfg.ForceNewCluster { //是否强制创建新集群
 			id, cl, n, s, w = restartNode(cfg, snapshot) //重启节点
 		} else {
-			id, cl, n, s, w = restartAsStandaloneNode(cfg, snapshot) //重启成一个新的节点
+			id, cl, n, s, w = restartAsStandaloneNode(cfg, snapshot) //单节点重启
 		}
 
-		cl.SetStore(st)                                                                          //设置存储
-		cl.SetBackend(be)                                                                        //设置be
-		cl.Recover(api.UpdateCapability)                                                         //恢复集群
-		if cl.Version() != nil && !cl.Version().LessThan(semver.Version{Major: 3}) && !beExist { //这是在干嘛？
+		cl.SetStore(st)                  //设置存储
+		cl.SetBackend(be)                //设置be
+		cl.Recover(api.UpdateCapability) //恢复集群
+		// 检查是否存在db文件
+		if cl.Version() != nil && !cl.Version().LessThan(semver.Version{Major: 3}) && !beExist {
 			os.RemoveAll(bepath)
 			return nil, fmt.Errorf("database file (%v) of the backend is missing", bepath)
 		}
@@ -548,7 +633,11 @@ func NewServer(cfg config.ServerConfig) (srv *EtcdServer, err error) {
 		return nil, fmt.Errorf("cannot access member directory: %v", terr)
 	}
 
-	sstats := stats.NewServerStats(cfg.Name, id.String())   //？
+	// 创建ServerStats
+	// 该实例中封装了集群及其节点的统计信息
+	sstats := stats.NewServerStats(cfg.Name, id.String())
+	// 创建LeaderStats
+	// 该实例由leader使用，封装了其follower的通信统计信息
 	lstats := stats.NewLeaderStats(cfg.Logger, id.String()) //？
 
 	heartbeat := time.Duration(cfg.TickMs) * time.Millisecond //设定0.1秒一次心跳
@@ -566,8 +655,8 @@ func NewServer(cfg config.ServerConfig) (srv *EtcdServer, err error) {
 				isIDRemoved: func(id uint64) bool { return cl.IsIDRemoved(types.ID(id)) },
 				Node:        n,                 //集群中的节点
 				heartbeat:   heartbeat,         //心跳时间
-				raftStorage: s,                 //raft的内存存储，暂时不知道存的啥
-				storage:     NewStorage(w, ss), //存储快照和wal日志，猜测是用于状态机
+				raftStorage: s,                 //raft的内存存储
+				storage:     NewStorage(w, ss), //存储快照和wal日志
 			},
 		),
 		id:                 id,                                                                              //服务器id
@@ -592,7 +681,8 @@ func NewServer(cfg config.ServerConfig) (srv *EtcdServer, err error) {
 
 	// always recover lessor before kv. When we recover the mvcc.KV it will reattach keys to its leases.
 	// If we recover mvcc.KV first, it will attach the keys to the wrong lessor before it recovers.
-	srv.lessor = lease.NewLessor(srv.Logger(), srv.be, lease.LessorConfig{ //租约的相关配置
+	// 恢复lessor
+	srv.lessor = lease.NewLessor(srv.Logger(), srv.be, lease.LessorConfig{
 		MinLeaseTTL:                int64(math.Ceil(minTTL.Seconds())),
 		CheckpointInterval:         cfg.LeaseCheckpointInterval,
 		ExpiredLeasesRetryInterval: srv.Cfg.ReqTimeout(),
@@ -608,11 +698,12 @@ func NewServer(cfg config.ServerConfig) (srv *EtcdServer, err error) {
 		cfg.Logger.Warn("failed to create token provider", zap.Error(err))
 		return nil, err
 	}
-	srv.kv = mvcc.New(srv.Logger(), srv.be, srv.lessor, mvcc.StoreConfig{CompactionBatchLimit: cfg.CompactionBatchLimit}) //mvcc相关配置
+	// 恢复kv，并绑定对应的租约
+	srv.kv = mvcc.New(srv.Logger(), srv.be, srv.lessor, mvcc.StoreConfig{CompactionBatchLimit: cfg.CompactionBatchLimit})
 
 	kvindex := ci.ConsistentIndex() //获取一致性索引
 	srv.lg.Debug("restore consistentIndex", zap.Uint64("index", kvindex))
-	if beExist { //如果bepath里面有文件，当快照与一致性索引对不上时，则报错
+	if beExist { //如果bepath里面有文件，当快照大于一致性索引时，说明backend中存在数据丢失，则报错
 		// TODO: remove kvindex != 0 checking when we do not expect users to upgrade
 		// etcd from pre-3.0 release.
 		if snapshot != nil && kvindex < snapshot.Metadata.Index {
@@ -675,12 +766,12 @@ func NewServer(cfg config.ServerConfig) (srv *EtcdServer, err error) {
 		return nil, err
 	}
 	// add all remotes into transport
-	for _, m := range remotes { //将所有对等成员加入传输接口
+	for _, m := range remotes { //将所有对等成员加入传输接口（远端）
 		if m.ID != id {
 			tr.AddRemote(m.ID, m.PeerURLs)
 		}
 	}
-	for _, m := range cl.Members() { //将所有集群中的成员加入传输接口,这里为什么要加两遍呢?
+	for _, m := range cl.Members() { //将所有集群中的成员加入传输接口（本地）
 		if m.ID != id {
 			tr.AddPeer(m.ID, m.PeerURLs)
 		}
@@ -723,6 +814,7 @@ func (s *EtcdServer) adjustTicks() {
 	clusterN := len(s.cluster.Members())
 
 	// single-node fresh start, or single-node recovers from snapshot
+	// 如果是单节点启动或者重启，快速推进选举
 	if clusterN == 1 {
 		ticks := s.Cfg.ElectionTicks - 1
 		lg.Info(
@@ -737,6 +829,7 @@ func (s *EtcdServer) adjustTicks() {
 		return
 	}
 
+	// 如果没有设置初始化选举提前，则退出
 	if !s.Cfg.InitialElectionTickAdvance {
 		lg.Info("skipping initial election tick advance", zap.Int("election-ticks", s.Cfg.ElectionTicks))
 		return
@@ -751,6 +844,7 @@ func (s *EtcdServer) adjustTicks() {
 	// then, do nothing, because advancing ticks would have no effect
 	waitTime := rafthttp.ConnReadTimeout
 	itv := 50 * time.Millisecond
+	// 在超时之前每隔50ms尝试获取活跃的peer
 	for i := int64(0); i < int64(waitTime/itv); i++ {
 		select {
 		case <-time.After(itv):
@@ -758,6 +852,7 @@ func (s *EtcdServer) adjustTicks() {
 			return
 		}
 
+		// 如果存在活跃的对等方，则将本地选举向前推进到只剩下两个刻度
 		peerN := s.r.transport.ActivePeers()
 		if peerN > 1 {
 			// multi-node received peer connection reports
@@ -785,16 +880,25 @@ func (s *EtcdServer) adjustTicks() {
 // Start must be non-blocking; any long-running server functionality
 // should be implemented in goroutines.
 func (s *EtcdServer) Start() {
+	// 启动一个协程用于执行etcdServer.run方法
 	s.start()
+	// 启动一个协程，用于提前选举的时间刻度
 	s.GoAttach(func() { s.adjustTicks() })
 	// TODO: Switch to publishV3 in 3.6.
 	// Support for cluster_member_set_attr was added in 3.5.
+	// 启动一个协程，将当前节点的相关信息发送到集群其他节点
 	s.GoAttach(func() { s.publish(s.Cfg.ReqTimeout()) })
+	// 启动一个协程，定期清理wal日志文件和快照文件
 	s.GoAttach(s.purgeFile)
+	// 启动一个协程，实现一些监控相关的功能
 	s.GoAttach(func() { monitorFileDescriptor(s.Logger(), s.stopping) })
+	// 启动一个协程，用于监控其他节点的版本信息
 	s.GoAttach(s.monitorVersions)
+	// 启动一个协程，用于实现Linearizable read功能
 	s.GoAttach(s.linearizableReadLoop)
+	// 启动一个协程，用于监控KVHash
 	s.GoAttach(s.monitorKVHash)
+	// 启动一个协程，用于监控降级
 	s.GoAttach(s.monitorDowngrade)
 }
 
@@ -804,7 +908,7 @@ func (s *EtcdServer) Start() {
 func (s *EtcdServer) start() {
 	lg := s.Logger()
 
-	if s.Cfg.SnapshotCount == 0 { //设置默认的快照count，这个属性干嘛的？
+	if s.Cfg.SnapshotCount == 0 {
 		lg.Info(
 			"updating snapshot-count to default",
 			zap.Uint64("given-snapshot-count", s.Cfg.SnapshotCount),
@@ -812,7 +916,7 @@ func (s *EtcdServer) start() {
 		)
 		s.Cfg.SnapshotCount = DefaultSnapshotCount
 	}
-	if s.Cfg.SnapshotCatchUpEntries == 0 { //这个属性干嘛的？
+	if s.Cfg.SnapshotCatchUpEntries == 0 {
 		lg.Info(
 			"updating snapshot catch-up entries to default",
 			zap.Uint64("given-snapshot-catchup-entries", s.Cfg.SnapshotCatchUpEntries),
@@ -821,16 +925,16 @@ func (s *EtcdServer) start() {
 		s.Cfg.SnapshotCatchUpEntries = DefaultSnapshotCatchUpEntries
 	}
 
-	s.w = wait.New()                                           //新建一个wait
-	s.applyWait = wait.NewTimeList()                           //新建一个timeList
-	s.done = make(chan struct{})                               //干嘛的？
-	s.stop = make(chan struct{})                               //干嘛的？
-	s.stopping = make(chan struct{}, 1)                        //干嘛的？
-	s.ctx, s.cancel = context.WithCancel(context.Background()) //释放ctx的前置方法
-	s.readwaitc = make(chan struct{}, 1)                       //正在等待通知chan
-	s.readNotifier = newNotifier()                             //通知etcd的read例程在没有错误时可以处理数据，啥意思？
-	s.leaderChanged = make(chan struct{})                      //干嘛的？
-	if s.ClusterVersion() != nil {                             //如果集群版本不等于空，打印集群与本地id信息
+	s.w = wait.New()                 //新建一个wait
+	s.applyWait = wait.NewTimeList() //新建一个timeList
+	s.done = make(chan struct{})
+	s.stop = make(chan struct{})
+	s.stopping = make(chan struct{}, 1)
+	s.ctx, s.cancel = context.WithCancel(context.Background())
+	s.readwaitc = make(chan struct{}, 1)
+	s.readNotifier = newNotifier()
+	s.leaderChanged = make(chan struct{})
+	if s.ClusterVersion() != nil { //如果集群版本不等于空，打印集群与本地id信息
 		lg.Info(
 			"starting etcd server",
 			zap.String("local-member-id", s.ID().String()),
@@ -853,15 +957,21 @@ func (s *EtcdServer) start() {
 	go s.run() //运行服务
 }
 
+// 定期清理快照文件和wal日志文件
 func (s *EtcdServer) purgeFile() {
 	lg := s.Logger()
 	var dberrc, serrc, werrc <-chan error
 	var dbdonec, sdonec, wdonec <-chan struct{}
+	// 如果最大快照文件数被设置
 	if s.Cfg.MaxSnapFiles > 0 {
+		// 每隔30秒清理一次"snap.db"前缀的文件
 		dbdonec, dberrc = fileutil.PurgeFileWithDoneNotify(lg, s.Cfg.SnapDir(), "snap.db", s.Cfg.MaxSnapFiles, purgeFileInterval, s.stopping)
+		// 每隔30秒清理一次"snap"前缀的文件
 		sdonec, serrc = fileutil.PurgeFileWithDoneNotify(lg, s.Cfg.SnapDir(), "snap", s.Cfg.MaxSnapFiles, purgeFileInterval, s.stopping)
 	}
+	// 如果最大wal日志文件数被设置
 	if s.Cfg.MaxWALFiles > 0 {
+		// 每隔30秒清理一次"wal"前缀的文件
 		wdonec, werrc = fileutil.PurgeFileWithDoneNotify(lg, s.Cfg.WALDir(), "wal", s.Cfg.MaxWALFiles, purgeFileInterval, s.stopping)
 	}
 
@@ -993,6 +1103,7 @@ type etcdProgress struct {
 // raftReadyHandler contains a set of EtcdServer operations to be called by raftNode,
 // and helps decouple state machine logic from Raft algorithms.
 // TODO: add a state machine interface to apply the commit entries and do snapshot/recover
+// 一系列回调方法，用于在raftnode中修改etcdserver的属性
 type raftReadyHandler struct {
 	getLead              func() (lead uint64)
 	updateLead           func(lead uint64)
@@ -1009,12 +1120,13 @@ func (s *EtcdServer) run() {
 	}
 
 	// asynchronously accept apply packets, dispatch progress in-order
-	sched := schedule.NewFIFOScheduler() //运行一个异步队列并返回该队列，这个队列是做什么的？
+	sched := schedule.NewFIFOScheduler() //运行一个异步队列并返回该队列
 
 	var (
 		smu   sync.RWMutex
 		syncC <-chan time.Time
 	)
+	// setSyncC与getSyncC用来设置发送SYNC消息的定时器
 	setSyncC := func(ch <-chan time.Time) {
 		smu.Lock()
 		syncC = ch
@@ -1027,25 +1139,35 @@ func (s *EtcdServer) run() {
 		return
 	}
 	rh := &raftReadyHandler{ //封装一组raft操作，让raft操作与etcd的状态机解藕
-		getLead:    func() (lead uint64) { return s.getLead() },
+		// 获取Lead
+		getLead: func() (lead uint64) { return s.getLead() },
+		// 更新Lead
 		updateLead: func(lead uint64) { s.setLead(lead) },
+		// raftNode 在处理 etcd raft 模块返回的 Ready.SoftState 字段时，会调用
+		// raftReadyHandler.updateLeadership()回调函数 其中会根据当前节点的状态和
+		// Leader 节点是否发生变化完成一些相应的操作
 		updateLeadership: func(newLeader bool) {
-			if !s.isLeader() {
+			if !s.isLeader() { // 如果不是leader
+				// 降级lessor
 				if s.lessor != nil {
 					s.lessor.Demote()
 				}
+				// 非leader节点暂停自动压缩
 				if s.compactor != nil {
 					s.compactor.Pause()
 				}
+				// 非leader节点不会发送SYNC消息，将定时器设置为nil
 				setSyncC(nil)
 			} else {
-				if newLeader {
+				if newLeader { // 如果升级成为leader
 					t := time.Now()
 					s.leadTimeMu.Lock()
 					s.leadElectedTime = t
 					s.leadTimeMu.Unlock()
 				}
+				// 设置SYNC消息定时器
 				setSyncC(s.SyncTicker.C)
+				// 重启自动压缩功能
 				if s.compactor != nil {
 					s.compactor.Resume()
 				}
@@ -1053,16 +1175,19 @@ func (s *EtcdServer) run() {
 			if newLeader {
 				s.leaderChangedMu.Lock()
 				lc := s.leaderChanged
+				// 设置新的leaderChanged
 				s.leaderChanged = make(chan struct{})
-				close(lc)
+				close(lc) // 关闭原来的leaderChanged用于通知丢弃旧请求
 				s.leaderChangedMu.Unlock()
 			}
 			// TODO: remove the nil checking
 			// current test utility does not provide the stats
+			// ？？？？？？
 			if s.stats != nil {
 				s.stats.BecomeLeader()
 			}
 		},
+		// 更新当前etcdServer的CommittedIndex
 		updateCommittedIndex: func(ci uint64) {
 			cci := s.getCommittedIndex()
 			if ci > cci {
@@ -1072,11 +1197,12 @@ func (s *EtcdServer) run() {
 	}
 	s.r.start(rh) //将这组方法交由raftnode执行
 
-	ep := etcdProgress{ //设置etcd实时状态
-		confState: sn.Metadata.ConfState, //conf状态
-		snapi:     sn.Metadata.Index,     //快照index
-		appliedt:  sn.Metadata.Term,      //任期
-		appliedi:  sn.Metadata.Index,     //请求index
+	// 记录当前快照相关的元数据和已应用entry记录的位置
+	ep := etcdProgress{
+		confState: sn.Metadata.ConfState,
+		snapi:     sn.Metadata.Index,
+		appliedt:  sn.Metadata.Term,
+		appliedi:  sn.Metadata.Index,
 	}
 
 	defer func() {
@@ -1107,9 +1233,11 @@ func (s *EtcdServer) run() {
 
 	for {
 		select {
+		// 读取applyc中的apply实例并进行处理
 		case ap := <-s.r.apply():
 			f := func(context.Context) { s.applyAll(&ep, &ap) }
 			sched.Schedule(f)
+		// 如果有已到期的租约，则进行处理
 		case leases := <-expiredLeaseC:
 			s.GoAttach(func() {
 				// Increases throughput of expired leases deletion process through parallelization
@@ -1142,8 +1270,9 @@ func (s *EtcdServer) run() {
 			lg.Warn("server error", zap.Error(err))
 			lg.Warn("data-dir used by this member must be removed")
 			return
-		case <-getSyncC():
-			if s.v2store.HasTTLKeys() {
+		case <-getSyncC(): //定时发送SYNC消息
+			if s.v2store.HasTTLKeys() { // 如果v2存储中只有永久节点则无需发送SYNC
+				// 发送sync的目的是为了清除v2中的过期节点
 				s.sync(s.Cfg.ReqTimeout())
 			}
 		case <-s.stop:
@@ -1943,6 +2072,7 @@ func (s *EtcdServer) sync(timeout time.Duration) {
 // with the static clientURLs of the server.
 // The function keeps attempting to register until it succeeds,
 // or its server is stopped.
+// 使用v3请求进行服务器信息注册（尚未实装）
 func (s *EtcdServer) publishV3(timeout time.Duration) {
 	req := &membershippb.ClusterMemberAttrSetRequest{
 		Member_ID: uint64(s.id),
@@ -2004,6 +2134,7 @@ func (s *EtcdServer) publishV3(timeout time.Duration) {
 // client handler disabled (e.g. --enable-v2=false), cluster can still
 // process publish requests through rafthttp
 // TODO: Remove in 3.6 (start using publishV3)
+// 即将在3.6版本中被删除
 func (s *EtcdServer) publish(timeout time.Duration) {
 	lg := s.Logger()
 	b, err := json.Marshal(s.attributes)
@@ -2011,6 +2142,7 @@ func (s *EtcdServer) publish(timeout time.Duration) {
 		lg.Panic("failed to marshal JSON", zap.Error(err))
 		return
 	}
+	// 封装成put请求
 	req := pb.Request{
 		Method: "PUT",
 		Path:   membership.MemberAttributesStorePath(s.id),
@@ -2019,9 +2151,11 @@ func (s *EtcdServer) publish(timeout time.Duration) {
 
 	for {
 		ctx, cancel := context.WithTimeout(s.ctx, timeout)
+		// 调用do方法发送请求（v2版本）
 		_, err := s.Do(ctx, req)
 		cancel()
 		switch err {
+		// 发送成功，关闭readych通道通知其他协程
 		case nil:
 			close(s.readych)
 			lg.Info(
@@ -2033,7 +2167,7 @@ func (s *EtcdServer) publish(timeout time.Duration) {
 				zap.Duration("publish-timeout", timeout),
 			)
 			return
-
+		// 如果是stop错误，则停止发布，因为服务已经停止
 		case ErrStopped:
 			lg.Warn(
 				"stopped publish because server is stopped",
@@ -2043,7 +2177,7 @@ func (s *EtcdServer) publish(timeout time.Duration) {
 				zap.Error(err),
 			)
 			return
-
+			// 否则不断进行尝试
 		default:
 			lg.Warn(
 				"failed to publish local member to cluster through raft",

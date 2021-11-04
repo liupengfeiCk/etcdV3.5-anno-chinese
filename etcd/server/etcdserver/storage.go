@@ -31,17 +31,23 @@ import (
 type Storage interface {
 	// Save function saves ents and state to the underlying stable storage.
 	// Save MUST block until st and ents are on stable storage.
+	// 负责将entry记录和hardState保存到底层的持久化存储上
 	Save(st raftpb.HardState, ents []raftpb.Entry) error
 	// SaveSnap function saves snapshot to the underlying stable storage.
+	// 负责将快照数据持久化到本地快照文件中
 	SaveSnap(snap raftpb.Snapshot) error
 	// Close closes the Storage and performs finalization.
 	Close() error
 	// Release releases the locked wal files older than the provided snapshot.
+	// 释放比提供的快照更旧的被锁定的wal文件
+	// 会将该文件的文件句柄清除
 	Release(snap raftpb.Snapshot) error
 	// Sync WAL
+	// 同步wal日志
 	Sync() error
 }
 
+// 内嵌了wal日志和快照处理程序
 type storage struct {
 	*wal.WAL
 	*snap.Snapshotter
@@ -53,6 +59,7 @@ func NewStorage(w *wal.WAL, s *snap.Snapshotter) Storage {
 
 // SaveSnap saves the snapshot file to disk and writes the WAL snapshot entry.
 func (st *storage) SaveSnap(snap raftpb.Snapshot) error {
+	// 根据快照元数据创建wal快照实例
 	walsnap := walpb.Snapshot{
 		Index:     snap.Metadata.Index,
 		Term:      snap.Metadata.Term,
@@ -61,12 +68,13 @@ func (st *storage) SaveSnap(snap raftpb.Snapshot) error {
 	// save the snapshot file before writing the snapshot to the wal.
 	// This makes it possible for the snapshot file to become orphaned, but prevents
 	// a WAL snapshot entry from having no corresponding snapshot file.
+	// 将快照写入到快照文件中
 	err := st.Snapshotter.SaveSnap(snap)
 	if err != nil {
 		return err
 	}
 	// gofail: var raftBeforeWALSaveSnaphot struct{}
-
+	// 将快照封装成Record并写入wal日志中
 	return st.WAL.SaveSnapshot(walsnap)
 }
 
@@ -74,9 +82,11 @@ func (st *storage) SaveSnap(snap raftpb.Snapshot) error {
 // - releases the locks to the wal files that are older than the provided wal for the given snap.
 // - deletes any .snap.db files that are older than the given snap.
 func (st *storage) Release(snap raftpb.Snapshot) error {
+	// 调用wal日志的文件句柄清除方法
 	if err := st.WAL.ReleaseLockTo(snap.Metadata.Index); err != nil {
 		return err
 	}
+	// 调用快照文件程序的快照文件清除方法
 	return st.Snapshotter.ReleaseSnapDBs(snap)
 }
 

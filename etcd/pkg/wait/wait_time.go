@@ -20,8 +20,10 @@ type WaitTime interface {
 	// Wait returns a chan that waits on the given logical deadline.
 	// The chan will be triggered when Trigger is called with a
 	// deadline that is later than the one it is waiting for.
+	// 以死线为id创建chan
 	Wait(deadline uint64) <-chan struct{}
 	// Trigger triggers all the waiting chans with an earlier logical deadline.
+	// 将小于指定死线的通道关闭
 	Trigger(deadline uint64)
 }
 

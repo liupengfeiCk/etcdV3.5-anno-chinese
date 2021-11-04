@@ -310,12 +310,15 @@ func (s *Snapshotter) ReleaseSnapDBs(snap raftpb.Snapshot) error {
 	}
 	for _, filename := range filenames {
 		if strings.HasSuffix(filename, ".snap.db") {
+			// 从文件名中获取其最后一条记录的index
 			hexIndex := strings.TrimSuffix(filepath.Base(filename), ".snap.db")
 			index, err := strconv.ParseUint(hexIndex, 16, 64)
 			if err != nil {
 				s.lg.Error("failed to parse index from filename", zap.String("path", filename), zap.String("error", err.Error()))
 				continue
 			}
+			// 删除小于给定快照的最后一条index的快照文件
+			// 因为这些快照文件一定要比当前的快照文件旧
 			if index < snap.Metadata.Index {
 				s.lg.Info("found orphaned .snap.db file; deleting", zap.String("path", filename))
 				if rmErr := os.Remove(filepath.Join(s.dir, filename)); rmErr != nil && !os.IsNotExist(rmErr) {

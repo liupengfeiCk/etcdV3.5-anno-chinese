@@ -55,22 +55,31 @@ func newPeerHandler(
 	peerMembersHandler := newPeerMembersHandler(lg, s.Cluster())
 	peerMemberPromoteHandler := newPeerMemberPromoteHandler(lg, s)
 
+	// 创建一个mux用于请求处理
 	mux := http.NewServeMux()
+	// 绑定"/"为404
 	mux.HandleFunc("/", http.NotFound)
+	// 绑定"/raft"为raftHandler
 	mux.Handle(rafthttp.RaftPrefix, raftHandler)
+	// 绑定"/raft/"为raftHandler
 	mux.Handle(rafthttp.RaftPrefix+"/", raftHandler)
+	// 绑定"/member"为peerMembersHandler
 	mux.Handle(peerMembersPath, peerMembersHandler)
+	// 绑定"/members/promote/"为peerMemberPromoteHandler
 	mux.Handle(peerMemberPromotePrefix, peerMemberPromoteHandler)
 	if leaseHandler != nil {
 		mux.Handle(leasehttp.LeasePrefix, leaseHandler)
 		mux.Handle(leasehttp.LeaseInternalPrefix, leaseHandler)
 	}
+	// 绑定租约相关的handler
 	if downgradeEnabledHandler != nil {
 		mux.Handle(etcdserver.DowngradeEnabledPath, downgradeEnabledHandler)
 	}
+	// 绑定hashKV相关的handler
 	if hashKVHandler != nil {
 		mux.Handle(etcdserver.PeerHashKVPath, hashKVHandler)
 	}
+	// 绑定获取版本的handler
 	mux.HandleFunc(versionPath, versionHandler(s.Cluster(), serveVersion))
 	return mux
 }

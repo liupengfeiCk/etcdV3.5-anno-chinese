@@ -264,7 +264,8 @@ func StartEtcd(inCfg *Config) (e *Etcd, err error) {
 	}
 	e.Server.Start() //启动服务
 
-	if err = e.servePeers(); err != nil { //启动对等服务
+	// 启动对每个peer的监听
+	if err = e.servePeers(); err != nil {
 		return e, err
 	}
 	if err = e.serveClients(); err != nil { //启动客户端服务
@@ -530,7 +531,9 @@ func configurePeerListeners(cfg *Config) (peers []*peerListener, err error) {
 
 // configure peer handlers after rafthttp.Transport started
 func (e *Etcd) servePeers() (err error) {
+	// 注册handler用于各个节点直接的内部通信
 	ph := etcdhttp.NewPeerHandler(e.GetLogger(), e.Server)
+	// 获取TLS设置
 	var peerTLScfg *tls.Config
 	if !e.cfg.PeerTLSInfo.Empty() {
 		if peerTLScfg, err = e.cfg.PeerTLSInfo.ServerConfig(); err != nil {
@@ -538,17 +541,24 @@ func (e *Etcd) servePeers() (err error) {
 		}
 	}
 
+	// 为每个对外暴露的peer创建一个grpc server 和 http server
 	for _, p := range e.Peers {
 		u := p.Listener.Addr().String()
 		gs := v3rpc.Server(e.Server, peerTLScfg)
+		// 创建一个cmux用来监听同一地址的不同服务
+		// cmux用于重用同一个tcp Listener来监听不同的服务
 		m := cmux.New(p.Listener)
+		// 使用http2协议启动rpc服务
 		go gs.Serve(m.Match(cmux.HTTP2()))
+		// 创建server
 		srv := &http.Server{
 			Handler:     grpcHandlerFunc(gs, ph),
 			ReadTimeout: 5 * time.Minute,
 			ErrorLog:    defaultLog.New(ioutil.Discard, "", 0), // do not log user error
 		}
+		// 使用any的方式启动http.Server服务
 		go srv.Serve(m.Match(cmux.Any()))
+		// 设置启动函数，其中m.Serve()方法用于启动cmux来进行监听
 		p.serve = func() error {
 			e.cfg.logger.Info(
 				"cmux::serve",
@@ -556,6 +566,7 @@ func (e *Etcd) servePeers() (err error) {
 			)
 			return m.Serve()
 		}
+		// 设置关闭函数
 		p.close = func(ctx context.Context) error {
 			// gracefully shutdown http.Server
 			// close open listeners, idle connections
@@ -575,6 +586,7 @@ func (e *Etcd) servePeers() (err error) {
 	}
 
 	// start peer servers in a goroutine
+	// 启动每个peer所对应的服务
 	for _, pl := range e.Peers {
 		go func(l *peerListener) {
 			u := l.Addr().String()

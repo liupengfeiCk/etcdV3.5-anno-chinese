@@ -934,12 +934,14 @@ func (w *WAL) ReleaseLockTo(index uint64) error {
 
 	var smaller int
 	found := false
+	// 找到需要释放的文件句柄
 	for i, l := range w.locks {
 		_, lockIndex, err := parseWALName(filepath.Base(l.Name()))
 		if err != nil {
 			return err
 		}
 		if lockIndex >= index {
+			// 释放在i之前的所有文件句柄
 			smaller = i - 1
 			found = true
 			break
@@ -948,20 +950,24 @@ func (w *WAL) ReleaseLockTo(index uint64) error {
 
 	// if no lock index is greater than the release index, we can
 	// release lock up to the last one(excluding).
+	// 如果没找到，则释放全部句柄
 	if !found {
 		smaller = len(w.locks) - 1
 	}
 
+	// 没有要释放的文件句柄
 	if smaller <= 0 {
 		return nil
 	}
 
+	// 释放文件句柄
 	for i := 0; i < smaller; i++ {
 		if w.locks[i] == nil {
 			continue
 		}
 		w.locks[i].Close()
 	}
+	// 为文件句柄集合切片
 	w.locks = w.locks[smaller:]
 
 	return nil

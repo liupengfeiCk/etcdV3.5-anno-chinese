@@ -454,12 +454,13 @@ func (s *store) restore() error {
 		scheduledCompact = 0
 	}
 
-	// 租约相关内容先不看
+	// 这里的keyToLease是在restoreChunk方法中进行填充的
 	for key, lid := range keyToLease {
 		if s.le == nil {
 			tx.Unlock()
 			panic("no lessor to attach lease")
 		}
+		// 添加键跟lease的映射
 		err := s.le.Attach(lid, []lease.LeaseItem{{Key: key}})
 		if err != nil {
 			s.lg.Error(

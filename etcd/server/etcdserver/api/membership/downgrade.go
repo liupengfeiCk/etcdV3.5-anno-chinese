@@ -20,11 +20,14 @@ import (
 	"go.uber.org/zap"
 )
 
+// 集群降级相关
 type DowngradeInfo struct {
 	// TargetVersion is the target downgrade version, if the cluster is not under downgrading,
 	// the targetVersion will be an empty string
+	// 集群降级版本，如果未降级则为空
 	TargetVersion string `json:"target-version"`
 	// Enabled indicates whether the cluster is enabled to downgrade
+	// 是否启用集群降级
 	Enabled bool `json:"enabled"`
 }
 

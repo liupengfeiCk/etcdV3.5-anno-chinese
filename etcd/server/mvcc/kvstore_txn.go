@@ -265,12 +265,12 @@ func (tw *storeTxnWrite) put(key, value []byte, leaseID lease.LeaseID) {
 	tw.changes = append(tw.changes, kv)
 	tw.trace.Step("store kv pair into bolt db")
 
-	// 租约内容暂时不看
 	// 如果旧的租约不为0号租约
 	if oldLease != lease.NoLease {
 		if tw.s.le == nil {
 			panic("no lessor to detach lease")
 		}
+		// 取消租约的绑定
 		err = tw.s.le.Detach(oldLease, []lease.LeaseItem{{Key: string(key)}})
 		if err != nil {
 			tw.storeTxnRead.s.lg.Error(
@@ -279,10 +279,12 @@ func (tw *storeTxnWrite) put(key, value []byte, leaseID lease.LeaseID) {
 			)
 		}
 	}
+	// 如果新的租约不为0号租约
 	if leaseID != lease.NoLease {
 		if tw.s.le == nil {
 			panic("no lessor to attach lease")
 		}
+		// 增加租约与键值对的绑定
 		err = tw.s.le.Attach(leaseID, []lease.LeaseItem{{Key: string(key)}})
 		if err != nil {
 			panic("unexpected error from lease Attach")
@@ -344,10 +346,11 @@ func (tw *storeTxnWrite) delete(key []byte) {
 	// 向changes中添加此次操作
 	tw.changes = append(tw.changes, kv)
 
-	// 租约操作暂时不看
 	item := lease.LeaseItem{Key: string(key)}
+	// 根据item获取租约
 	leaseID := tw.s.le.GetLease(item)
 
+	// 如果租约不为0号租约，则解绑
 	if leaseID != lease.NoLease {
 		err = tw.s.le.Detach(leaseID, []lease.LeaseItem{item})
 		if err != nil {

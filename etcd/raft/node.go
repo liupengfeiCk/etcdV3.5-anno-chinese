@@ -260,6 +260,7 @@ func StartNode(c *Config, peers []Peer) Node {
 // The current membership of the cluster will be restored from the Storage.
 // If the caller has an existing state machine, pass in the last log index that
 // has been applied to it; otherwise use zero.
+// 不使用peer而是从存储中恢复
 func RestartNode(c *Config) Node { //重启节点
 	rn, err := NewRawNode(c) //直接通过cfg恢复节点
 	if err != nil {

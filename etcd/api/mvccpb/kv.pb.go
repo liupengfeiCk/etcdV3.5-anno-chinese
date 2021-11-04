@@ -27,7 +27,9 @@ const _ = proto.ProtoPackageIsVersion3 // please upgrade the proto package
 type Event_EventType int32
 
 const (
-	PUT    Event_EventType = 0
+	// 新增或者更新事件
+	PUT Event_EventType = 0
+	// 删除事件，事件对应的键值对会被删除
 	DELETE Event_EventType = 1
 )
 
@@ -114,18 +116,22 @@ func (m *KeyValue) XXX_DiscardUnknown() {
 
 var xxx_messageInfo_KeyValue proto.InternalMessageInfo
 
+// 事件封装
 type Event struct {
 	// type is the kind of event. If type is a PUT, it indicates
 	// new data has been stored to the key. If type is a DELETE,
 	// it indicates the key was deleted.
+	// 如果该type为0，则表示是一个put类型，1则表示是一个delete类型
 	Type Event_EventType `protobuf:"varint,1,opt,name=type,proto3,enum=mvccpb.Event_EventType" json:"type,omitempty"`
 	// kv holds the KeyValue for the event.
 	// A PUT event contains current kv pair.
 	// A PUT event with kv.Version=1 indicates the creation of a key.
 	// A DELETE/EXPIRE event contains the deleted key with
 	// its modification revision set to the revision of deletion.
+	// 记录发生此次事件之后的键值对数据
 	Kv *KeyValue `protobuf:"bytes,2,opt,name=kv,proto3" json:"kv,omitempty"`
 	// prev_kv holds the key-value pair before the event happens.
+	// 该字段记录发生此次事件之前的键值对数据
 	PrevKv               *KeyValue `protobuf:"bytes,3,opt,name=prev_kv,json=prevKv,proto3" json:"prev_kv,omitempty"`
 	XXX_NoUnkeyedLiteral struct{}  `json:"-"`
 	XXX_unrecognized     []byte    `json:"-"`

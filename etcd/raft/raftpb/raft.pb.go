@@ -311,7 +311,7 @@ type SnapshotMetadata struct { //快照元数据
 	ConfState ConfState `protobuf:"bytes,1,opt,name=conf_state,json=confState" json:"conf_state"`
 	// 最后一条记录的index
 	Index uint64 `protobuf:"varint,2,opt,name=index" json:"index"`
-	// 最后一条记录的索引
+	// 最后一条记录的任期
 	Term uint64 `protobuf:"varint,3,opt,name=term" json:"term"`
 }
 

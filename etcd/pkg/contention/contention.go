@@ -29,6 +29,7 @@ type TimeoutDetector struct {
 	maxDuration time.Duration
 	// map from event to time
 	// time is the last seen time of the event.
+	// 记录了上一次向目标节点发送心跳的时间
 	records map[uint64]time.Time
 }
 
@@ -58,12 +59,14 @@ func (td *TimeoutDetector) Observe(which uint64) (bool, time.Duration) {
 	now := time.Now()
 	exceed := time.Duration(0)
 
+	// 如果上一次发送的时间到现在已经超过最大间隔时间，返回false
 	if pt, found := td.records[which]; found {
 		exceed = now.Sub(pt) - td.maxDuration
 		if exceed > 0 {
 			ok = false
 		}
 	}
+	// 记录这次的发送时间
 	td.records[which] = now
 	return ok, exceed
 }

@@ -95,18 +95,22 @@ func (a *reqV2HandlerEtcdServer) QGet(ctx context.Context, r *RequestV2) (Respon
 }
 
 func (a *reqV2HandlerEtcdServer) processRaftRequest(ctx context.Context, r *RequestV2) (Response, error) {
+	// 序列化请求
 	data, err := ((*pb.Request)(r)).Marshal()
 	if err != nil {
 		return Response{}, err
 	}
+	// 为请求id建立一个wait通道，用于等待请求
 	ch := a.s.w.Register(r.ID)
 
 	start := time.Now()
+	// 将请求交给底层etcd-raft处理
 	a.s.r.Propose(ctx, data)
 	proposalsPending.Inc()
 	defer proposalsPending.Dec()
 
 	select {
+	// 等待请求完成
 	case x := <-ch:
 		resp := x.(Response)
 		return resp, resp.Err
@@ -120,6 +124,7 @@ func (a *reqV2HandlerEtcdServer) processRaftRequest(ctx context.Context, r *Requ
 }
 
 func (s *EtcdServer) Do(ctx context.Context, r pb.Request) (Response, error) {
+	// 生成唯一id
 	r.ID = s.reqIDGen.Next()
 	h := &reqV2HandlerEtcdServer{
 		reqV2HandlerStore: reqV2HandlerStore{
@@ -129,6 +134,7 @@ func (s *EtcdServer) Do(ctx context.Context, r pb.Request) (Response, error) {
 		s: s,
 	}
 	rp := &r
+	// 发送请求
 	resp, err := ((*RequestV2)(rp)).Handle(ctx, h)
 	resp.Term, resp.Index = s.Term(), s.CommittedIndex()
 	return resp, err

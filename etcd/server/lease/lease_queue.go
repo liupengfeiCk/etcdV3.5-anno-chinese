@@ -28,6 +28,7 @@ type LeaseWithTime struct {
 	index int
 }
 
+// 该对象为一个基于time的小根堆，实现了 container/heap 的方法
 type LeaseQueue []*LeaseWithTime
 
 func (pq LeaseQueue) Len() int { return len(pq) }
@@ -80,11 +81,13 @@ func (mq *LeaseExpiredNotifier) Init() {
 	}
 }
 
+// 更新或增加LeaseWithTime
 func (mq *LeaseExpiredNotifier) RegisterOrUpdate(item *LeaseWithTime) {
-	if old, ok := mq.m[item.id]; ok {
+	if old, ok := mq.m[item.id]; ok { // 如果对应的item存在，则修改之后再平衡
 		old.time = item.time
+		// 再平衡小根堆
 		heap.Fix(&mq.queue, old.index)
-	} else {
+	} else { // 不存在则直接添加
 		heap.Push(&mq.queue, item)
 		mq.m[item.id] = item
 	}

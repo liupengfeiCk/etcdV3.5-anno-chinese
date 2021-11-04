@@ -29,22 +29,28 @@ var (
 	watchBatchMaxRevs = 1000
 )
 
+// 可以封装多个event实例，进行批量处理
 type eventBatch struct {
 	// evs is a batch of revision-ordered events
+	// 其中记录的实例按照revision进行排序
 	evs []mvccpb.Event
 	// revs is the minimum unique revisions observed for this batch
+	// 记录了事件集合中的事件来自多少个不同的main revision
 	revs int
 	// moreRev is first revision with more events following this batch
+	// 当eventBatch中的事件达到上限后新的事件将无法加入，该字段记录了第一个无法加入的事件的main revision
 	moreRev int64
 }
 
+// 添加事件到eventBatch
 func (eb *eventBatch) add(ev mvccpb.Event) {
+	// 如果事件已达到上限，则直接退出
 	if eb.revs > watchBatchMaxRevs {
 		// maxed out batch size
 		return
 	}
 
-	if len(eb.evs) == 0 {
+	if len(eb.evs) == 0 { //如果为空，则直接添加
 		// base case
 		eb.revs = 1
 		eb.evs = append(eb.evs, ev)
@@ -54,19 +60,25 @@ func (eb *eventBatch) add(ev mvccpb.Event) {
 	// revision accounting
 	ebRev := eb.evs[len(eb.evs)-1].Kv.ModRevision
 	evRev := ev.Kv.ModRevision
+	// 如果新事件的main revision较大，则是一个新的main revision
+	// 因为新事件一定能够保证是 >= 当前事件集合中的最大事件 main revision的
 	if evRev > ebRev {
 		eb.revs++
+		// 判断是否达到上限，如果达到则记录该值
 		if eb.revs > watchBatchMaxRevs {
 			eb.moreRev = evRev
 			return
 		}
 	}
 
+	// 添加事件到集合中
 	eb.evs = append(eb.evs, ev)
 }
 
+// 保存watcher与eventBatch的映射关系
 type watcherBatch map[*watcher]*eventBatch
 
+// 提供一个方法用来添加watcher与eventBathc
 func (wb watcherBatch) add(w *watcher, ev mvccpb.Event) {
 	eb := wb[w]
 	if eb == nil {
@@ -146,10 +158,15 @@ func (w watcherSetByKey) delete(wa *watcher) bool {
 // watcherGroup is a collection of watchers organized by their ranges
 type watcherGroup struct {
 	// keyWatchers has the watchers that watch on a single key
+	// 记录了监听单独的key的watcher实例
+	// 结构为map[string]watcherSet
 	keyWatchers watcherSetByKey
 	// ranges has the watchers that watch a range; it is sorted by interval
+	// 范围监听的watcher实例
+	// 该存储结构为一个线段树
 	ranges adt.IntervalTree
 	// watchers is the set of all watchers
+	// 存储了group中所有的watcher实例
 	watchers watcherSet
 }
 
@@ -163,20 +180,24 @@ func newWatcherGroup() watcherGroup {
 
 // add puts a watcher in the group.
 func (wg *watcherGroup) add(wa *watcher) {
+	// 首先将其放入watchers中保存
 	wg.watchers.add(wa)
-	if wa.end == nil {
-		wg.keyWatchers.add(wa)
+	if wa.end == nil { // 如果不是范围监听
+		wg.keyWatchers.add(wa) //直接添加进单个监听集合中
 		return
 	}
 
 	// interval already registered?
+	// 范围监听，则创建一个线段树节点
 	ivl := adt.NewStringAffineInterval(string(wa.key), string(wa.end))
 	if iv := wg.ranges.Find(ivl); iv != nil {
+		// 如果在线段树中查到了该节点，则直接将watcher添加进该节点
 		iv.Val.(watcherSet).add(wa)
 		return
 	}
 
 	// not registered, put in interval tree
+	// 否则则新加入一个线段树节点
 	ws := make(watcherSet)
 	ws.add(wa)
 	wg.ranges.Insert(ivl, ws)
@@ -222,23 +243,28 @@ func (wg *watcherGroup) delete(wa *watcher) bool {
 
 // choose selects watchers from the watcher group to update
 func (wg *watcherGroup) choose(maxWatchers int, curRev, compactRev int64) (*watcherGroup, int64) {
-	if len(wg.watchers) < maxWatchers {
+	if len(wg.watchers) < maxWatchers { // 如果不足需要查询的数量，直接全部返回
 		return wg, wg.chooseAll(curRev, compactRev)
 	}
 	ret := newWatcherGroup()
-	for w := range wg.watchers {
+	for w := range wg.watchers { //否则从watchers中添加 maxWatchers 个watcher
 		if maxWatchers <= 0 {
 			break
 		}
 		maxWatchers--
 		ret.add(w)
 	}
+	// 返回指定数量的watcher
 	return &ret, ret.chooseAll(curRev, compactRev)
 }
 
+// 查询指定watcher集合中的最小minRev
 func (wg *watcherGroup) chooseAll(curRev, compactRev int64) int64 {
 	minRev := int64(math.MaxInt64)
 	for w := range wg.watchers {
+		// 这里的观察者minRev可能会高于curRev
+		// 因为在发生网络分区恢复时，从leader那里恢复的watcher可能会高于当前curRev
+		// 当这个watcher被选中进行批处理时，会确认其恢复状态，并将其restore设置为false，表示已被恢复
 		if w.minRev > curRev {
 			// after network partition, possibly choosing future revision watcher from restore operation
 			// with watch key "proxy-namespace__lostleader" and revision "math.MaxInt64 - 2"
@@ -250,16 +276,18 @@ func (wg *watcherGroup) chooseAll(curRev, compactRev int64) int64 {
 			// mark 'restore' done, since it's chosen
 			w.restore = false
 		}
+		// 如果当前watcher已经被压缩
 		if w.minRev < compactRev {
 			select {
-			case w.ch <- WatchResponse{WatchID: w.id, CompactRevision: compactRev}:
+			case w.ch <- WatchResponse{WatchID: w.id, CompactRevision: compactRev}: //发送一个已被压缩的响应
 				w.compacted = true
-				wg.delete(w)
-			default:
+				wg.delete(w) //删除该watcher
+			default: //ch阻塞，下次在尝试
 				// retry next time
 			}
 			continue
 		}
+		// 更新最小minRev
 		if minRev > w.minRev {
 			minRev = w.minRev
 		}
